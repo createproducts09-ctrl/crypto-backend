@@ -48,13 +48,11 @@ def _tokens_for(user_id: ObjectId | str) -> dict[str, str]:
     }
 
 
-def _send_emails_async(email: str, username: str, code: str, user_id: ObjectId):
+def _send_emails_async(email: str, username: str, code: str):
     """Send verification and welcome emails in background thread."""
     try:
         verify_result = resend_mail.send_verification_email(email, username, code)
         welcome_result = resend_mail.send_welcome_email(email, username)
-        if welcome_result.get("ok"):
-            db.users.update_one({"_id": user_id}, {"$set": {"welcome_email_sent": True}})
         logger.info("Background emails sent for %s: verify=%s, welcome=%s", email, verify_result.get("ok"), welcome_result.get("ok"))
     except Exception as exc:
         logger.warning("Background email sending failed for %s: %s", email, exc)
@@ -96,7 +94,7 @@ def register_user(email: str, password: str, username: str) -> tuple[dict | None
     # Send emails asynchronously to avoid blocking the response
     thread = threading.Thread(
         target=_send_emails_async,
-        args=(email, username, code, result.inserted_id),
+        args=(email, username, code),
         daemon=True
     )
     thread.start()
