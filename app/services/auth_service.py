@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -47,6 +48,18 @@ def _tokens_for(user_id: ObjectId | str) -> dict[str, str]:
     }
 
 
+def _send_emails_async(email: str, username: str, code: str, user_id: ObjectId):
+    """Send verification and welcome emails in background thread."""
+    try:
+        verify_result = resend_mail.send_verification_email(email, username, code)
+        welcome_result = resend_mail.send_welcome_email(email, username)
+        if welcome_result.get("ok"):
+            db.users.update_one({"_id": user_id}, {"$set": {"welcome_email_sent": True}})
+        logger.info("Background emails sent for %s: verify=%s, welcome=%s", email, verify_result.get("ok"), welcome_result.get("ok"))
+    except Exception as exc:
+        logger.warning("Background email sending failed for %s: %s", email, exc)
+
+
 def register_user(email: str, password: str, username: str) -> tuple[dict | None, str | None]:
     email = email.strip().lower()
     username = username.strip()
@@ -80,23 +93,22 @@ def register_user(email: str, password: str, username: str) -> tuple[dict | None
     result = db.users.insert_one(doc)
     doc["_id"] = result.inserted_id
 
-    # Verification email (required for confirming the address)
-    verify_result = resend_mail.send_verification_email(email, username, code)
-    # Welcome / gratitude email for downloading the app
-    welcome_result = resend_mail.send_welcome_email(email, username)
-    if welcome_result.get("ok"):
-        db.users.update_one({"_id": result.inserted_id}, {"$set": {"welcome_email_sent": True}})
+    # Send emails asynchronously to avoid blocking the response
+    thread = threading.Thread(
+        target=_send_emails_async,
+        args=(email, username, code, result.inserted_id),
+        daemon=True
+    )
+    thread.start()
 
     tokens = _tokens_for(result.inserted_id)
     return {
         "user": serialize_user(doc),
         **tokens,
-        "email_sent": bool(verify_result.get("ok")),
-        "welcome_sent": bool(welcome_result.get("ok")),
+        "email_sent": True,  # Optimistically true since we're sending in background
+        "welcome_sent": True,
         "needs_verification": True,
-        "mail_error": None
-        if verify_result.get("ok")
-        else (verify_result.get("error") if not verify_result.get("skipped") else None),
+        "mail_error": None,
     }, None
 
 
