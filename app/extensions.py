@@ -8,7 +8,7 @@ from pymongo import MongoClient
 from pymongo.database import Database
 
 jwt = JWTManager()
-socketio = SocketIO(cors_allowed_origins="*", async_mode="eventlet")
+socketio = SocketIO(cors_allowed_origins="*", async_mode="threading")
 mongo_client: Optional[MongoClient] = None
 
 
