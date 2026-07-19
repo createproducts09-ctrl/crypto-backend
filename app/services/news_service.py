@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import threading
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -128,15 +129,23 @@ def sync_news_feed(limit: int = 40) -> int:
     return count
 
 
+def _sync_news_async():
+    """Sync news feed in background."""
+    try:
+        sync_news_feed()
+    except Exception:
+        pass
+
+
 def list_news(category: str | None = None, limit: int = 40) -> list[dict[str, Any]]:
     query: dict[str, Any] = {}
     if category:
         query["categories"] = category
     if db.news.count_documents({}) == 0:
-        try:
-            sync_news_feed()
-        except Exception:
-            pass
+        # Sync in background, return empty for now
+        thread = threading.Thread(target=_sync_news_async, daemon=True)
+        thread.start()
+        return []
     cursor = db.news.find(query, {"_id": 0}).sort("published_at", -1).limit(limit)
     out = []
     for n in cursor:
