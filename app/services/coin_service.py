@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 from datetime import datetime, timezone
 from typing import Any
@@ -10,6 +11,8 @@ from app.extensions import db
 from app.utils.indicators import bollinger, ema, macd, rsi, summarize_ta
 from app.utils.research_copy import build_fundamentals, build_technical_takeaways, clean_prose, split_sentences
 from app.utils.scoring import map_market_coin
+
+logger = logging.getLogger(__name__)
 
 
 TIMEFRAME_DAYS = {
@@ -90,62 +93,66 @@ def _refresh_coin_async(coin_id: str):
 
 
 def get_coin(coin_id: str) -> dict | None:
-    cached = db.coins.find_one({"id": coin_id}, {"_id": 0})
-    if cached:
-        # Refresh in background if cache is stale (older than 5 minutes)
-        if cached.get("updated_at"):
-            age = datetime.now(timezone.utc) - cached["updated_at"]
-            if age.total_seconds() > 300:
-                thread = threading.Thread(target=_refresh_coin_async, args=(coin_id,), daemon=True)
-                thread.start()
-        return cached
-    # No cache, fetch synchronously
     try:
-        detail = coingecko.coin_detail(coin_id)
-    except Exception:
-        return None
+        cached = db.coins.find_one({"id": coin_id}, {"_id": 0})
+        if cached:
+            # Refresh in background if cache is stale (older than 5 minutes)
+            if cached.get("updated_at"):
+                age = datetime.now(timezone.utc) - cached["updated_at"]
+                if age.total_seconds() > 300:
+                    thread = threading.Thread(target=_refresh_coin_async, args=(coin_id,), daemon=True)
+                    thread.start()
+            return cached
+        # No cache, fetch synchronously
+        try:
+            detail = coingecko.coin_detail(coin_id)
+        except Exception:
+            return None
 
-    md = detail.get("market_data") or {}
-    links = detail.get("links") or {}
-    description = clean_prose(((detail.get("description") or {}).get("en") or ""))[:2000]
-    categories = detail.get("categories") or []
-    merged = {
-        "id": detail.get("id"),
-        "symbol": (detail.get("symbol") or "").upper(),
-        "name": detail.get("name"),
-        "image": (detail.get("image") or {}).get("large"),
-        "description": description,
-        "about_bullets": split_sentences(description, limit=5) or [
-            f"{detail.get('name') or coin_id} is a digital asset we track for calm research.",
-            "Open Fundamentals and AI Brief for structured bullets instead of a wall of text.",
-        ],
-        "genesis_date": detail.get("genesis_date"),
-        "hashing_algorithm": detail.get("hashing_algorithm"),
-        "categories": categories,
-        "tags": categories[:6],
-        "homepage": (links.get("homepage") or [None])[0],
-        "current_price": (md.get("current_price") or {}).get("usd"),
-        "market_cap": (md.get("market_cap") or {}).get("usd"),
-        "fully_diluted_valuation": (md.get("fully_diluted_valuation") or {}).get("usd"),
-        "total_volume": (md.get("total_volume") or {}).get("usd"),
-        "circulating_supply": md.get("circulating_supply"),
-        "total_supply": md.get("total_supply"),
-        "max_supply": md.get("max_supply"),
-        "price_change_percentage_24h": md.get("price_change_percentage_24h"),
-        "price_change_percentage_7d": md.get("price_change_percentage_7d"),
-        "price_change_percentage_30d": md.get("price_change_percentage_30d"),
-        "ath": (md.get("ath") or {}).get("usd"),
-        "atl": (md.get("atl") or {}).get("usd"),
-        "market_cap_rank": detail.get("market_cap_rank"),
-        "community_data": detail.get("community_data"),
-        "developer_data": detail.get("developer_data"),
-        "updated_at": datetime.now(timezone.utc),
-    }
-    if not merged.get("ai_insight"):
-        merged["ai_insight"] = ai_service.insight_for_coin(merged)
-    merged["fundamentals"] = build_fundamentals(merged, description, categories)
-    db.coins.update_one({"id": coin_id}, {"$set": merged}, upsert=True)
-    return merged
+        md = detail.get("market_data") or {}
+        links = detail.get("links") or {}
+        description = clean_prose(((detail.get("description") or {}).get("en") or ""))[:2000]
+        categories = detail.get("categories") or []
+        merged = {
+            "id": detail.get("id"),
+            "symbol": (detail.get("symbol") or "").upper(),
+            "name": detail.get("name"),
+            "image": (detail.get("image") or {}).get("large"),
+            "description": description,
+            "about_bullets": split_sentences(description, limit=5) or [
+                f"{detail.get('name') or coin_id} is a digital asset we track for calm research.",
+                "Open Fundamentals and AI Brief for structured bullets instead of a wall of text.",
+            ],
+            "genesis_date": detail.get("genesis_date"),
+            "hashing_algorithm": detail.get("hashing_algorithm"),
+            "categories": categories,
+            "tags": categories[:6],
+            "homepage": (links.get("homepage") or [None])[0],
+            "current_price": (md.get("current_price") or {}).get("usd"),
+            "market_cap": (md.get("market_cap") or {}).get("usd"),
+            "fully_diluted_valuation": (md.get("fully_diluted_valuation") or {}).get("usd"),
+            "total_volume": (md.get("total_volume") or {}).get("usd"),
+            "circulating_supply": md.get("circulating_supply"),
+            "total_supply": md.get("total_supply"),
+            "max_supply": md.get("max_supply"),
+            "price_change_percentage_24h": md.get("price_change_percentage_24h"),
+            "price_change_percentage_7d": md.get("price_change_percentage_7d"),
+            "price_change_percentage_30d": md.get("price_change_percentage_30d"),
+            "ath": (md.get("ath") or {}).get("usd"),
+            "atl": (md.get("atl") or {}).get("usd"),
+            "market_cap_rank": detail.get("market_cap_rank"),
+            "community_data": detail.get("community_data"),
+            "developer_data": detail.get("developer_data"),
+            "updated_at": datetime.now(timezone.utc),
+        }
+        if not merged.get("ai_insight"):
+            merged["ai_insight"] = ai_service.insight_for_coin(merged)
+        merged["fundamentals"] = build_fundamentals(merged, description, categories)
+        db.coins.update_one({"id": coin_id}, {"$set": merged}, upsert=True)
+        return merged
+    except Exception as exc:
+        logger.error("Error fetching coin %s: %s", coin_id, exc)
+        return None
 
 
 def get_chart(coin_id: str, timeframe: str = "7D") -> dict[str, Any]:
