@@ -26,14 +26,21 @@ TIMEFRAME_DAYS = {
 }
 
 
-def upsert_markets(raw_markets: list[dict[str, Any]]) -> int:
+def upsert_markets(
+    raw_markets: list[dict[str, Any]],
+    *,
+    generate_insights: bool = True,
+) -> int:
     now = datetime.now(timezone.utc)
     count = 0
     for raw in raw_markets:
         mapped = map_market_coin(raw)
-        if not mapped.get("ai_insight"):
+        if generate_insights and not mapped.get("ai_insight"):
             mapped["ai_insight"] = ai_service.insight_for_coin(mapped)
         mapped["updated_at"] = now
+        # Don't wipe detail categories/tags with sparse market-list heuristics.
+        mapped.pop("tags", None)
+        mapped.pop("categories", None)
         db.coins.update_one({"id": mapped["id"]}, {"$set": mapped}, upsert=True)
         count += 1
     return count
@@ -42,6 +49,22 @@ def upsert_markets(raw_markets: list[dict[str, Any]]) -> int:
 def list_cached_coins(limit: int = 100, skip: int = 0) -> list[dict]:
     cursor = db.coins.find({}, {"_id": 0}).sort("market_cap_rank", 1).skip(skip).limit(limit)
     return list(cursor)
+
+
+def _as_utc(dt: Any) -> datetime | None:
+    """Normalize Mongo/ISO datetimes so age checks never mix naive vs aware."""
+    if dt is None:
+        return None
+    if isinstance(dt, str):
+        try:
+            dt = datetime.fromisoformat(dt.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if not isinstance(dt, datetime):
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 def _refresh_coin_async(coin_id: str):
@@ -97,8 +120,9 @@ def get_coin(coin_id: str) -> dict | None:
         cached = db.coins.find_one({"id": coin_id}, {"_id": 0})
         if cached:
             # Refresh in background if cache is stale (older than 5 minutes)
-            if cached.get("updated_at"):
-                age = datetime.now(timezone.utc) - cached["updated_at"]
+            updated = _as_utc(cached.get("updated_at"))
+            if updated is not None:
+                age = datetime.now(timezone.utc) - updated
                 if age.total_seconds() > 300:
                     thread = threading.Thread(target=_refresh_coin_async, args=(coin_id,), daemon=True)
                     thread.start()
@@ -106,7 +130,8 @@ def get_coin(coin_id: str) -> dict | None:
         # No cache, fetch synchronously
         try:
             detail = coingecko.coin_detail(coin_id)
-        except Exception:
+        except Exception as exc:
+            logger.warning("CoinGecko detail failed for %s: %s", coin_id, exc)
             return None
 
         md = detail.get("market_data") or {}

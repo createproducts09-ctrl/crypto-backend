@@ -47,8 +47,15 @@ def create_basket():
     if not isinstance(coin_ids, list):
         return jsonify({"error": "coin_ids must be a list"}), 400
     coin_ids = [str(c).strip() for c in coin_ids if str(c).strip()]
+    user_id = get_jwt_identity()
+    try:
+        from app.services import billing_service
+
+        billing_service.assert_can_create_basket(user_id)
+    except PermissionError as exc:
+        return jsonify({"error": str(exc), "code": "plan_limit", "upgrade": True}), 402
     basket = portfolio_service.create_basket(
-        get_jwt_identity(),
+        user_id,
         name=name,
         coin_ids=coin_ids,
         # Prefer explicit selection; import only if no coins selected

@@ -43,6 +43,18 @@ def get_thread(user_id: str, thread_id: str) -> dict | None:
     }
 
 
+def delete_thread(user_id: str, thread_id: str) -> bool:
+    try:
+        oid = ObjectId(thread_id)
+    except Exception:
+        return False
+    result = db.ai_threads.delete_one({"_id": oid, "user_id": user_id})
+    if result.deleted_count == 0:
+        return False
+    db.ai_messages.delete_many({"thread_id": thread_id})
+    return True
+
+
 def send_message(user_id: str, payload: dict[str, Any]) -> dict:
     thread_id = payload.get("thread_id")
     content = (payload.get("content") or "").strip()
@@ -74,19 +86,43 @@ def send_message(user_id: str, payload: dict[str, Any]) -> dict:
     messages = [{"role": m["role"], "content": m["content"]} for m in history]
 
     context_parts = []
+    research_mode = False
     if coin_id:
         coin = db.coins.find_one({"id": coin_id}, {"_id": 0})
         if coin:
+            research_mode = True
+            risk = coin.get("risk") or {}
             context_parts.append(
-                f"Coin {coin.get('name')} ({coin.get('symbol')}): price={coin.get('current_price')}, "
-                f"24h={coin.get('price_change_percentage_24h')}, mcap={coin.get('market_cap')}, "
-                f"insight={coin.get('ai_insight')}"
+                "Attached coin research context (use this as ground truth; do not invent prices):\n"
+                f"- id={coin.get('id')} name={coin.get('name')} symbol={coin.get('symbol')}\n"
+                f"- price_usd={coin.get('current_price')} rank={coin.get('market_cap_rank')}\n"
+                f"- mcap={coin.get('market_cap')} fdv={coin.get('fully_diluted_valuation')} "
+                f"volume_24h={coin.get('total_volume')}\n"
+                f"- change_1h={coin.get('price_change_percentage_1h')} "
+                f"change_24h={coin.get('price_change_percentage_24h')} "
+                f"change_7d={coin.get('price_change_percentage_7d')} "
+                f"change_30d={coin.get('price_change_percentage_30d')}\n"
+                f"- ath={coin.get('ath')} atl={coin.get('atl')}\n"
+                f"- circulating={coin.get('circulating_supply')} "
+                f"total={coin.get('total_supply')} max={coin.get('max_supply')}\n"
+                f"- sentiment={coin.get('sentiment')} risk={risk.get('level')} "
+                f"risk_confidence={risk.get('confidence')} "
+                f"community_score={coin.get('community_score')} "
+                f"liquidity_score={coin.get('liquidity_score')}\n"
+                f"- categories={', '.join((coin.get('categories') or coin.get('tags') or [])[:8])}\n"
+                f"- insight={coin.get('ai_insight')}\n"
+                f"- about={'; '.join((coin.get('about_bullets') or [])[:4]) or (coin.get('description') or '')[:500]}"
             )
+            # Pull latest cached chart TA if present in a recent call is hard; keep market snapshot rich.
     news = list(db.news.find({}, {"_id": 0, "title": 1, "sentiment": 1}).sort("published_at", -1).limit(5))
     if news:
         context_parts.append("Recent headlines: " + "; ".join(n.get("title", "") for n in news))
 
-    reply = ai_service.chat(messages, context="\n".join(context_parts) or None)
+    reply = ai_service.chat(
+        messages,
+        context="\n".join(context_parts) or None,
+        research_mode=research_mode,
+    )
     db.ai_messages.insert_one(
         {
             "thread_id": thread_id,

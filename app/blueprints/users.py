@@ -19,7 +19,10 @@ def me():
 @jwt_required()
 def update_me():
     data = request.get_json() or {}
-    user = auth_service.update_user(get_jwt_identity(), data)
+    try:
+        user = auth_service.update_user(get_jwt_identity(), data)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     return jsonify(user)
 
 

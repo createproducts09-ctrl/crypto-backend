@@ -18,11 +18,14 @@ def _optional_user_id() -> str | None:
 
 @bp.get("/filters")
 def filters():
-    return jsonify({"items": discover_service.list_filters()})
+    user_id = _optional_user_id()
+    return jsonify({"items": discover_service.list_filters(user_id=user_id)})
 
 
 @bp.get("/deck")
 def deck():
+    from app.services import billing_service
+
     filter_key = request.args.get("filter", "trending")
     try:
         limit = min(int(request.args.get("limit", 30)), 50)
@@ -33,13 +36,20 @@ def deck():
     browse = str(request.args.get("browse", "")).lower() in {"1", "true", "yes"}
     exclude_raw = request.args.get("exclude") or ""
     exclude_ids = [x.strip() for x in exclude_raw.split(",") if x.strip()]
-    user_id = None if browse else _optional_user_id()
+    # Always resolve optional auth so plan gates / why-blurbs work in browse mode
+    auth_user_id = _optional_user_id()
+    user_id = None if browse else auth_user_id
+    try:
+        billing_service.assert_can_use_filter(auth_user_id, filter_key)
+    except PermissionError as exc:
+        return jsonify({"error": str(exc), "code": "plan_limit", "upgrade": True}), 402
     data = discover_service.get_deck(
         filter_key=filter_key,
         limit=limit,
         user_id=user_id,
         exclude_ids=None if browse else (exclude_ids or None),
         allow_recycle=False if browse else allow_recycle,
+        include_why=bool(auth_user_id and billing_service.is_keel(auth_user_id)),
     )
     if browse:
         data.setdefault("meta", {})["browse"] = True

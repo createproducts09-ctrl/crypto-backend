@@ -29,6 +29,9 @@ def serialize_user(user: dict[str, Any]) -> dict[str, Any]:
     verified = user.get("email_verified")
     if verified is None:
         verified = True
+    plan = (user.get("plan") or "free").strip().lower()
+    if plan not in {"free", "keel"}:
+        plan = "free"
     return {
         "id": str(user["_id"]),
         "email": user["email"],
@@ -36,6 +39,7 @@ def serialize_user(user: dict[str, Any]) -> dict[str, Any]:
         "avatar": user.get("avatar"),
         "preferences": user.get("preferences") or {"theme": "system", "notifications": True},
         "email_verified": bool(verified),
+        "plan": plan,
         "created_at": user.get("created_at").isoformat() if user.get("created_at") else None,
     }
 
@@ -85,6 +89,7 @@ def register_user(email: str, password: str, username: str) -> tuple[dict | None
         "email_verification_code": code,
         "email_verification_expires": now + timedelta(hours=24),
         "welcome_email_sent": False,
+        "plan": "free",
         "created_at": now,
         "updated_at": now,
     }
@@ -232,6 +237,18 @@ def get_user(user_id: str) -> dict | None:
 def update_user(user_id: str, patch: dict[str, Any]) -> dict | None:
     allowed = {"username", "avatar", "preferences"}
     data = {k: v for k, v in patch.items() if k in allowed}
+    if "username" in data:
+        username = str(data["username"] or "").strip()
+        if len(username) < 2:
+            raise ValueError("Username must be at least 2 characters")
+        if len(username) > 32:
+            raise ValueError("Username is too long")
+        taken = db.users.find_one(
+            {"username": username, "_id": {"$ne": ObjectId(user_id)}}
+        )
+        if taken:
+            raise ValueError("Username is already taken")
+        data["username"] = username
     data["updated_at"] = _now()
     db.users.update_one({"_id": ObjectId(user_id)}, {"$set": data})
     return get_user(user_id)

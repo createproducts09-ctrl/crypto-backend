@@ -25,10 +25,28 @@ class AIService:
     def __init__(self):
         self.api_key = Config.GEMINI_API_KEY
         self.model = Config.GEMINI_MODEL
+        self.groq_api_key = getattr(Config, "GROQ_API_KEY", "") or ""
+        self.groq_model = getattr(Config, "GROQ_MODEL", "") or "llama-3.3-70b-versatile"
+        # Primary first, then configured fallbacks (deduped).
+        seen: set[str] = set()
+        models: list[str] = []
+        for m in [self.model, *getattr(Config, "GEMINI_MODEL_FALLBACKS", [])]:
+            if m and m not in seen:
+                seen.add(m)
+                models.append(m)
+        self.models = models or [self.model or "gemini-2.5-flash"]
 
     @property
     def enabled(self) -> bool:
+        return bool(self.api_key or self.groq_api_key)
+
+    @property
+    def gemini_enabled(self) -> bool:
         return bool(self.api_key)
+
+    @property
+    def groq_enabled(self) -> bool:
+        return bool(self.groq_api_key)
 
     def insight_for_coin(self, coin: dict[str, Any]) -> str:
         name = coin.get("name") or coin.get("symbol") or "This asset"
@@ -50,12 +68,52 @@ class AIService:
             return f"{name} is under pressure today — {FALLBACK_INSIGHTS[idx]}"
         return f"{name}: {FALLBACK_INSIGHTS[idx]}"
 
-    def chat(self, messages: list[dict[str, str]], context: str | None = None) -> str:
+    def chat(
+        self,
+        messages: list[dict[str, str]],
+        context: str | None = None,
+        research_mode: bool = False,
+    ) -> str:
         system = (
-            "You are a premium crypto research assistant for a fintech app. "
-            "Be clear, calm, and educational. Never give personalized financial advice. "
-            "Prefer structured, concise answers."
+            "You are Lumen Keel AI — a premium crypto research desk assistant. "
+            "Be clear, calm, and educational. Never give personalized financial advice "
+            "or tell the user to buy/sell. Prefer structured answers with short headings "
+            "and bullets. Use only provided market context for numbers; if a figure is "
+            "missing, say so instead of inventing it."
         )
+        if research_mode:
+            system += (
+                "\n\nWhen the user asks for research on the attached coin, ALWAYS respond "
+                "in this EXACT markdown structure (same headings every time, no extras, "
+                "no intro/outro outside sections):\n\n"
+                "### 1) Snapshot\n"
+                "2–4 short paragraphs. Plain English what it is and why it exists.\n\n"
+                "### 2) Market Tape\n"
+                "Use bullet metrics exactly like:\n"
+                "* **Spot Price**: ...\n"
+                "* **Market Capitalization**: ...\n"
+                "* **Fully Diluted Valuation (FDV)**: ...\n"
+                "* **24-Hour Trading Volume**: ...\n"
+                "* **1-Hour**: ...\n"
+                "* **24-Hour**: ...\n"
+                "* **7-Day**: ...\n"
+                "* **30-Day**: ...\n"
+                "* **All-Time High (ATH)**: ...\n"
+                "* **All-Time Low (ATL)**: ...\n"
+                "Then 1–2 short liquidity / desk-metric bullets.\n\n"
+                "### 3) Trend & Technical Read\n"
+                "Bullets for directional bias, structure, and key levels.\n\n"
+                "### 4) Fundamentals\n"
+                "Bullets for utility, supply/distribution, ecosystem.\n\n"
+                "### 5) Narratives & Catalysts\n"
+                "3–5 bullets on why it matters now.\n\n"
+                "### 6) Risks & Watch-Outs\n"
+                "3–5 concrete risk bullets (not generic).\n\n"
+                "### 7) What to Monitor Next\n"
+                "Numbered list 1–5 actionable checkpoints.\n\n"
+                "Separate sections with ---. Keep tone sharp and professional. "
+                "No buy/sell advice. Use only provided market context for numbers."
+            )
         if context:
             system += f"\n\nContext:\n{context}"
 
@@ -67,15 +125,34 @@ class AIService:
         full = [{"role": "system", "content": system}, *messages]
         try:
             return self._chat(full)
-        except AIRateLimitError:
+        except AIRateLimitError as exc:
             import logging
 
-            logging.getLogger(__name__).warning("Gemini rate-limited; using offline reply")
+            log = logging.getLogger(__name__)
+            if self.groq_enabled:
+                log.warning(
+                    "Gemini rate-limited (%s); trying free Groq fallback", exc
+                )
+                try:
+                    return self._chat_groq(full)
+                except Exception as groq_exc:
+                    log.warning("Groq fallback failed (%s); offline reply", groq_exc)
+            else:
+                log.warning(
+                    "Gemini rate-limited (%s); set GROQ_API_KEY for free fallback",
+                    exc,
+                )
             return self._fallback_reply(last, context, reason="rate_limit")
         except Exception as exc:
             import logging
 
-            logging.getLogger(__name__).warning("Gemini error (%s); using offline reply", exc)
+            log = logging.getLogger(__name__)
+            if self.groq_enabled and not self.gemini_enabled:
+                try:
+                    return self._chat_groq(full)
+                except Exception as groq_exc:
+                    log.warning("Groq error (%s); offline reply", groq_exc)
+            log.warning("Gemini error (%s); using offline reply", exc)
             return self._fallback_reply(last, context, reason="error")
 
     def summarize_news(self, title: str, body: str) -> str:
@@ -135,7 +212,12 @@ class AIService:
             "full": "",
         }
 
-    def _chat(self, messages: list[dict[str, str]], retries: int = 3) -> str:
+    def _chat(self, messages: list[dict[str, str]], retries: int = 2) -> str:
+        if not self.gemini_enabled:
+            if self.groq_enabled:
+                return self._chat_groq(messages)
+            raise RuntimeError("No AI provider configured")
+
         system_parts: list[str] = []
         contents: list[dict[str, Any]] = []
 
@@ -168,63 +250,185 @@ class AIService:
         if system_parts:
             payload["systemInstruction"] = {"parts": [{"text": "\n\n".join(system_parts)}]}
 
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
         last_error: Exception | None = None
+        rate_limit_detail = ""
 
-        for attempt in range(retries):
-            try:
-                with httpx.Client(timeout=60.0) as client:
-                    resp = client.post(url, params={"key": self.api_key}, json=payload)
+        for model in self.models:
+            url = (
+                "https://generativelanguage.googleapis.com/v1beta/models/"
+                f"{model}:generateContent"
+            )
+            for attempt in range(retries):
+                try:
+                    with httpx.Client(timeout=90.0) as client:
+                        resp = client.post(
+                            url, params={"key": self.api_key}, json=payload
+                        )
 
-                if resp.status_code == 429:
-                    # Honor Retry-After when present; otherwise exponential backoff
-                    retry_after = resp.headers.get("Retry-After")
-                    try:
-                        wait = float(retry_after) if retry_after else (1.5 * (2**attempt))
-                    except ValueError:
-                        wait = 1.5 * (2**attempt)
-                    wait = min(max(wait, 0.5), 12.0)
-                    if attempt < retries - 1:
-                        time.sleep(wait)
-                        continue
-                    raise AIRateLimitError("Gemini rate limit exceeded")
+                    if resp.status_code == 429:
+                        try:
+                            rate_limit_detail = (
+                                (resp.json().get("error") or {}).get("message") or ""
+                            )
+                        except Exception:
+                            rate_limit_detail = (resp.text or "")[:200]
+                        # Try next model immediately — this project's free quota for
+                        # gemini-2.0-flash is often limit:0 while other Flash models work.
+                        import logging
 
-                if resp.status_code >= 500:
+                        logging.getLogger(__name__).warning(
+                            "Gemini model %s rate-limited; trying next fallback", model
+                        )
+                        break
+
+                    if resp.status_code == 404:
+                        # Model not available for this key — try next.
+                        import logging
+
+                        logging.getLogger(__name__).warning(
+                            "Gemini model %s not found; trying next fallback", model
+                        )
+                        break
+
+                    if resp.status_code in (400, 401, 403):
+                        detail = ""
+                        try:
+                            detail = (resp.json().get("error") or {}).get("message") or ""
+                        except Exception:
+                            detail = (resp.text or "")[:300]
+                        raise RuntimeError(
+                            f"Gemini HTTP {resp.status_code}: {detail or resp.reason_phrase}"
+                        )
+
+                    if resp.status_code >= 500:
+                        if attempt < retries - 1:
+                            time.sleep(1.0 * (attempt + 1))
+                            continue
+                        resp.raise_for_status()
+
+                    resp.raise_for_status()
+                    data = resp.json()
+                    prompt_feedback = data.get("promptFeedback") or {}
+                    if prompt_feedback.get("blockReason"):
+                        raise RuntimeError(
+                            f"Gemini blocked prompt: {prompt_feedback.get('blockReason')}"
+                        )
+                    candidates = data.get("candidates") or []
+                    if not candidates:
+                        raise RuntimeError("Gemini returned no candidates")
+                    parts = ((candidates[0].get("content") or {}).get("parts")) or []
+                    text = "".join(part.get("text", "") for part in parts).strip()
+                    if not text:
+                        finish = candidates[0].get("finishReason") or "unknown"
+                        raise RuntimeError(
+                            f"Gemini returned empty text (finish={finish})"
+                        )
+                    if model != self.model:
+                        import logging
+
+                        logging.getLogger(__name__).info(
+                            "Gemini reply served via fallback model %s", model
+                        )
+                    return text
+                except AIRateLimitError:
+                    raise
+                except httpx.HTTPStatusError as exc:
+                    last_error = exc
+                    if exc.response is not None and exc.response.status_code == 429:
+                        break
                     if attempt < retries - 1:
                         time.sleep(1.0 * (attempt + 1))
                         continue
-                    resp.raise_for_status()
+                    raise
+                except (httpx.TimeoutException, httpx.TransportError) as exc:
+                    last_error = exc
+                    if attempt < retries - 1:
+                        time.sleep(1.0 * (attempt + 1))
+                        continue
+                    # Try next model on transport failure
+                    break
 
-                resp.raise_for_status()
-                data = resp.json()
-                candidates = data.get("candidates") or []
-                if not candidates:
-                    raise RuntimeError("Gemini returned no candidates")
-                parts = ((candidates[0].get("content") or {}).get("parts")) or []
-                text = "".join(part.get("text", "") for part in parts).strip()
-                if not text:
-                    raise RuntimeError("Gemini returned empty text")
-                return text
-            except AIRateLimitError:
-                raise
-            except httpx.HTTPStatusError as exc:
-                last_error = exc
-                if exc.response is not None and exc.response.status_code == 429:
-                    raise AIRateLimitError("Gemini rate limit exceeded") from exc
-                if attempt < retries - 1:
-                    time.sleep(1.0 * (attempt + 1))
-                    continue
-                raise
-            except (httpx.TimeoutException, httpx.TransportError) as exc:
-                last_error = exc
-                if attempt < retries - 1:
-                    time.sleep(1.0 * (attempt + 1))
-                    continue
-                raise
+        if rate_limit_detail:
+            # Prefer free Groq before surfacing rate-limit to chat().
+            if self.groq_enabled:
+                import logging
 
+                logging.getLogger(__name__).warning(
+                    "All Gemini models rate-limited; trying Groq (%s)",
+                    self.groq_model,
+                )
+                return self._chat_groq(messages)
+            raise AIRateLimitError(rate_limit_detail)
         if last_error:
             raise last_error
         raise RuntimeError("Gemini request failed")
+
+    def _chat_groq(self, messages: list[dict[str, str]]) -> str:
+        """Free Groq OpenAI-compatible chat (used when Gemini quota is exhausted)."""
+        if not self.groq_api_key:
+            raise RuntimeError("GROQ_API_KEY not set")
+
+        payload_messages: list[dict[str, str]] = []
+        for message in messages:
+            role = message.get("role") or "user"
+            text = (message.get("content") or "").strip()
+            if not text:
+                continue
+            if role not in ("system", "user", "assistant"):
+                role = "user"
+            payload_messages.append({"role": role, "content": text})
+
+        if not payload_messages:
+            raise RuntimeError("Empty Groq chat payload")
+
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        payload = {
+            "model": self.groq_model,
+            "messages": payload_messages,
+            "temperature": 0.4,
+        }
+        with httpx.Client(timeout=90.0) as client:
+            resp = client.post(
+                url,
+                headers={
+                    "Authorization": f"Bearer {self.groq_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+
+        if resp.status_code == 429:
+            detail = ""
+            try:
+                detail = (resp.json().get("error") or {}).get("message") or ""
+            except Exception:
+                detail = (resp.text or "")[:200]
+            raise AIRateLimitError(detail or "Groq rate limit")
+
+        if resp.status_code >= 400:
+            detail = ""
+            try:
+                detail = (resp.json().get("error") or {}).get("message") or ""
+            except Exception:
+                detail = (resp.text or "")[:300]
+            raise RuntimeError(
+                f"Groq HTTP {resp.status_code}: {detail or resp.reason_phrase}"
+            )
+
+        data = resp.json()
+        choices = data.get("choices") or []
+        if not choices:
+            raise RuntimeError("Groq returned no choices")
+        text = ((choices[0].get("message") or {}).get("content") or "").strip()
+        if not text:
+            raise RuntimeError("Groq returned empty text")
+
+        import logging
+
+        logging.getLogger(__name__).info(
+            "AI reply served via free Groq model %s", self.groq_model
+        )
+        return text
 
     def _fallback_reply(self, question: str, context: str | None, reason: str = "offline") -> str:
         """Local research reply when Gemini is unavailable.
