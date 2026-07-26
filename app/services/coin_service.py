@@ -115,6 +115,18 @@ def _refresh_coin_async(coin_id: str):
         pass
 
 
+def _hydrate_research_copy(coin: dict) -> dict:
+    """Rebuild About / Fundamentals from description so outline dumps stay clean."""
+    description = clean_prose(coin.get("description") or "")
+    categories = coin.get("categories") or coin.get("tags") or []
+    if description:
+        bullets = split_sentences(description, limit=5)
+        if bullets:
+            coin["about_bullets"] = bullets
+    coin["fundamentals"] = build_fundamentals(coin, description, list(categories))
+    return coin
+
+
 def get_coin(coin_id: str) -> dict | None:
     try:
         cached = db.coins.find_one({"id": coin_id}, {"_id": 0})
@@ -126,7 +138,7 @@ def get_coin(coin_id: str) -> dict | None:
                 if age.total_seconds() > 300:
                     thread = threading.Thread(target=_refresh_coin_async, args=(coin_id,), daemon=True)
                     thread.start()
-            return cached
+            return _hydrate_research_copy(cached)
         # No cache, fetch synchronously
         try:
             detail = coingecko.coin_detail(coin_id)

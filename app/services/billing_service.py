@@ -20,7 +20,7 @@ PLANS = {
             "Discover — core filters",
             "5 Ask AI messages / day",
             "1 portfolio basket",
-            "Community + watchlist",
+            "Personal watchlist",
         ],
     },
     "keel": {
@@ -34,6 +34,7 @@ PLANS = {
             "Unlimited Ask AI",
             "Unlimited baskets",
             "“Why this coin?” on every swipe",
+            "Swipe Pulse — crowd passes, likes & watchlists",
             "Priority research tools",
         ],
     },
@@ -123,6 +124,7 @@ def entitlements_for(user_id: str) -> dict[str, Any]:
             "create_basket": keel or baskets < FREE_BASKET_LIMIT,
             "all_filters": keel,
             "why_blurb": keel,
+            "swipe_pulse": keel,
         },
         "free_filters": sorted(FREE_FILTERS),
     }

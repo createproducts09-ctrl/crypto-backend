@@ -86,3 +86,25 @@ def allow_passed():
 @jwt_required()
 def stats():
     return jsonify(discover_service.get_stats(get_jwt_identity()))
+
+
+@bp.get("/pulse")
+@jwt_required()
+def pulse():
+    """Keel-only crowd pulse: most passed / interested / watchlisted coins."""
+    from app.services import billing_service
+
+    user_id = get_jwt_identity()
+    if not billing_service.is_keel(user_id):
+        return jsonify(
+            {
+                "error": "Swipe Pulse is a Keel feature — see what the desk is passing, liking, and watching.",
+                "code": "plan_limit",
+                "upgrade": True,
+            }
+        ), 402
+    try:
+        limit = min(int(request.args.get("limit", 12)), 25)
+    except ValueError:
+        limit = 12
+    return jsonify(discover_service.get_pulse(limit=limit))

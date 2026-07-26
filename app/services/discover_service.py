@@ -408,6 +408,105 @@ def get_stats(user_id: str) -> dict[str, Any]:
     }
 
 
+def _hydrate_ranked_coins(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Attach lean coin payloads to aggregated {coin_id, count} rows."""
+    ids = [r["coin_id"] for r in rows if r.get("coin_id")]
+    if not ids:
+        return []
+    coins = {
+        c["id"]: c
+        for c in db.coins.find(
+            {"id": {"$in": ids}},
+            {
+                "_id": 0,
+                "id": 1,
+                "name": 1,
+                "symbol": 1,
+                "image": 1,
+                "current_price": 1,
+                "price_change_percentage_24h": 1,
+                "market_cap_rank": 1,
+                "market_cap": 1,
+            },
+        )
+    }
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        cid = row["coin_id"]
+        coin = coins.get(cid)
+        if not coin:
+            continue
+        out.append(
+            {
+                "coin_id": cid,
+                "count": int(row.get("count") or 0),
+                "coin": coin,
+            }
+        )
+    return out
+
+
+def _top_swipe_action(action: str, limit: int = 12) -> list[dict[str, Any]]:
+    pipeline = [
+        {"$match": {"action": action}},
+        {"$group": {"_id": "$coin_id", "count": {"$sum": 1}}},
+        {"$sort": {"count": -1}},
+        {"$limit": int(limit)},
+    ]
+    rows = [
+        {"coin_id": doc["_id"], "count": doc["count"]}
+        for doc in db.discover_swipes.aggregate(pipeline)
+        if doc.get("_id")
+    ]
+    return _hydrate_ranked_coins(rows)
+
+
+def _top_watchlisted(limit: int = 12) -> list[dict[str, Any]]:
+    pipeline = [
+        {"$group": {"_id": "$coin_id", "count": {"$sum": 1}}},
+        {"$sort": {"count": -1}},
+        {"$limit": int(limit)},
+    ]
+    rows = [
+        {"coin_id": doc["_id"], "count": doc["count"]}
+        for doc in db.watchlist.aggregate(pipeline)
+        if doc.get("_id")
+    ]
+    return _hydrate_ranked_coins(rows)
+
+
+def get_pulse(limit: int = 12) -> dict[str, Any]:
+    """Crowd pulse from Discover swipes + watchlist (Keel feature)."""
+    limit = max(3, min(int(limit or 12), 25))
+    most_passed = _top_swipe_action("pass", limit)
+    most_interested = _top_swipe_action("interested", limit)
+    # Watch action on Discover + dedicated watchlist saves
+    watch_swipes = {
+        r["coin_id"]: r["count"] for r in _top_swipe_action("watch", limit * 2)
+    }
+    watchlisted = _top_watchlisted(limit * 2)
+    merged: dict[str, int] = {}
+    for cid, n in watch_swipes.items():
+        merged[cid] = merged.get(cid, 0) + n
+    for row in watchlisted:
+        cid = row["coin_id"]
+        merged[cid] = merged.get(cid, 0) + int(row["count"])
+    top_watch_ids = sorted(merged.items(), key=lambda x: x[1], reverse=True)[:limit]
+    most_watchlisted = _hydrate_ranked_coins(
+        [{"coin_id": cid, "count": n} for cid, n in top_watch_ids]
+    )
+
+    return {
+        "most_passed": most_passed,
+        "most_interested": most_interested,
+        "most_watchlisted": most_watchlisted,
+        "meta": {
+            "source": "discover_swipes+watchlist",
+            "limit": limit,
+        },
+    }
+
+
 def list_filters(user_id: str | None = None) -> list[dict]:
     from app.services.billing_service import FREE_FILTERS, is_keel
 

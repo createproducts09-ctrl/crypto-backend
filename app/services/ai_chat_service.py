@@ -59,6 +59,7 @@ def send_message(user_id: str, payload: dict[str, Any]) -> dict:
     thread_id = payload.get("thread_id")
     content = (payload.get("content") or "").strip()
     coin_id = payload.get("coin_id")
+    basket_id = (payload.get("basket_id") or "").strip() or None
     now = datetime.now(timezone.utc)
 
     if thread_id:
@@ -87,7 +88,37 @@ def send_message(user_id: str, payload: dict[str, Any]) -> dict:
 
     context_parts = []
     research_mode = False
-    if coin_id:
+    portfolio_mode = False
+    if basket_id:
+        from app.services import portfolio_service
+
+        basket = portfolio_service.get_basket(user_id, basket_id)
+        if basket:
+            portfolio_mode = True
+            assets = basket.get("assets") or []
+            lines = [
+                "Attached portfolio basket context (use as ground truth; do not invent holdings):\n"
+                f"- basket_id={basket.get('id')} name={basket.get('name')}\n"
+                f"- note={basket.get('note') or '—'}\n"
+                f"- total_value={basket.get('total_value')} total_cost={basket.get('total_cost')} "
+                f"pnl={basket.get('pnl')} pnl_pct={basket.get('pnl_pct')}\n"
+                f"- asset_count={len(assets)}"
+            ]
+            total = float(basket.get("total_value") or 0) or 0.0
+            for a in assets[:14]:
+                coin = a.get("coin") or {}
+                value = float(a.get("value") or 0) or 0.0
+                weight = (value / total * 100.0) if total > 0 else 0.0
+                lines.append(
+                    f"- holding {coin.get('name') or a.get('coin_id')} "
+                    f"({(coin.get('symbol') or a.get('coin_id') or '').upper()}): "
+                    f"qty={a.get('amount')} avg={a.get('avg_price')} "
+                    f"spot={coin.get('current_price')} chg24h={coin.get('price_change_percentage_24h')} "
+                    f"value={a.get('value')} pnl={a.get('pnl')} weight_pct={weight:.2f} "
+                    f"mcap_rank={coin.get('market_cap_rank')} sentiment={coin.get('sentiment')}"
+                )
+            context_parts.append("\n".join(lines))
+    if coin_id and not portfolio_mode:
         coin = db.coins.find_one({"id": coin_id}, {"_id": 0})
         if coin:
             research_mode = True
@@ -113,7 +144,6 @@ def send_message(user_id: str, payload: dict[str, Any]) -> dict:
                 f"- insight={coin.get('ai_insight')}\n"
                 f"- about={'; '.join((coin.get('about_bullets') or [])[:4]) or (coin.get('description') or '')[:500]}"
             )
-            # Pull latest cached chart TA if present in a recent call is hard; keep market snapshot rich.
     news = list(db.news.find({}, {"_id": 0, "title": 1, "sentiment": 1}).sort("published_at", -1).limit(5))
     if news:
         context_parts.append("Recent headlines: " + "; ".join(n.get("title", "") for n in news))
@@ -122,6 +152,7 @@ def send_message(user_id: str, payload: dict[str, Any]) -> dict:
         messages,
         context="\n".join(context_parts) or None,
         research_mode=research_mode,
+        portfolio_mode=portfolio_mode,
     )
     db.ai_messages.insert_one(
         {

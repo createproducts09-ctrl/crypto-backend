@@ -17,25 +17,16 @@ class Config:
     COINGECKO_BASE_URL = os.getenv("COINGECKO_BASE_URL", "https://api.coingecko.com/api/v3")
     CRYPTOCOMPARE_API_KEY = os.getenv("CRYPTOCOMPARE_API_KEY", "")
 
-    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-    GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
-    # Comma-separated fallbacks tried when the primary model is quota-blocked / missing.
-    GEMINI_MODEL_FALLBACKS = [
-        m.strip()
-        for m in os.getenv(
-            "GEMINI_MODEL_FALLBACKS",
-            "gemini-flash-latest,gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.0-flash",
-        ).split(",")
-        if m.strip()
-    ]
-
-    # Free OpenAI-compatible fallback when Gemini quota is exhausted.
-    # Get a key at https://console.groq.com/keys
+    # Groq only — https://console.groq.com/keys
     GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-    GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+    GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+    GROQ_TEMPERATURE = float(os.getenv("GROQ_TEMPERATURE", "1"))
+    GROQ_MAX_COMPLETION_TOKENS = int(os.getenv("GROQ_MAX_COMPLETION_TOKENS", "2048"))
+    GROQ_TOP_P = float(os.getenv("GROQ_TOP_P", "1"))
+    GROQ_REASONING_EFFORT = os.getenv("GROQ_REASONING_EFFORT", "medium")
 
     RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
-    RESEND_FROM = os.getenv("RESEND_FROM", "Lumen Keel <onboarding@resend.dev>")
+    RESEND_FROM = os.getenv("RESEND_FROM", "Alphora Labs <onboarding@resend.dev>")
 
     # Comma-separated origins, or "*" for all.
     # Include common Next.js ports — `next dev` often jumps to 3001/3002 when 3000 is busy.

@@ -76,7 +76,7 @@ def _fetch_rss() -> list[dict[str, Any]]:
     with httpx.Client(timeout=20.0, follow_redirects=True) as client:
         for feed in RSS_FEEDS:
             try:
-                resp = client.get(feed, headers={"User-Agent": "LumenKeelResearch/1.0"})
+                resp = client.get(feed, headers={"User-Agent": "AlphoraLabsResearch/1.0"})
                 resp.raise_for_status()
                 host = urlparse(feed).hostname or "rss"
                 collected.extend(_parse_rss(resp.text, host))
