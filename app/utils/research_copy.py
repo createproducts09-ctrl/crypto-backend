@@ -262,12 +262,6 @@ def build_fundamentals(
         "Thin books amplify both pumps and dumps when volume dries up",
     ]
 
-    how_to_read = [
-        "Start with market structure (mcap, volume, supply), then layer narrative and catalysts.",
-        "Use Tips mode on labels you don’t know — short explainers beat googling mid-scroll.",
-        "Write one sentence thesis before acting: what must stay true for this idea to work?",
-    ]
-
     return {
         "sections": [
             {"key": "snapshot", "title": "Quick snapshot", "icon": "flash", "bullets": overview},
@@ -278,7 +272,6 @@ def build_fundamentals(
             {"key": "watch_outs", "title": "Watch-outs", "icon": "alert", "bullets": watch_outs},
             {"key": "catalysts", "title": "Possible catalysts", "icon": "rocket", "bullets": catalysts},
             {"key": "risks", "title": "Risk stack", "icon": "shield", "bullets": risks},
-            {"key": "how_to_read", "title": "How to use this page", "icon": "book", "bullets": how_to_read},
         ],
         "project_overview": overview,
         "use_cases": cats[:5] or use_cases[:2],

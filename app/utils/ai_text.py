@@ -20,6 +20,38 @@ _MULTI_NL = re.compile(r"\n{3,}")
 _HEADING_GLUE = re.compile(r"([^#\n])[ \t]+(#{1,3}\s+\d+[).]\s+)")
 _SECTION_GLUE = re.compile(r"([^\n])\s*(---)\s*([^\n])")
 
+# Model / offline leaks users must never see
+_META_LINE = re.compile(
+    r"^(?:"
+    r"here(?:'s| is) a structured take\b.*"
+    r"|you asked:\s*.*"
+    r"|regarding\s+.+?:?\s*$"
+    r"|let me (?:clarify|break|structure|walk)\b.*"
+    r"|as an ai\b.*"
+    r"|available context\s*:?\s*"
+    r"|attached (?:coin|portfolio).*"
+    r"|use (?:this|as) ground truth.*"
+    r"|recent headlines\s*:.*"
+    r")$",
+    re.I,
+)
+_LEAKED_CONTEXT = re.compile(
+    r"(?:^|\n)\s*(?:available context|attached (?:coin|portfolio) research context|"
+    r"attached coin facts|attached portfolio basket|"
+    r"use this as ground truth|use as ground truth|"
+    r"internal fact sheet)\b[\s\S]*",
+    re.I,
+)
+_LEAKED_KV = re.compile(
+    r"(?:^|\n)\s*-\s*(?:id|price_usd|mcap|fdv|change_24h|circulating|sentiment|"
+    r"categories|insight|about|basket_id|total_value|name|symbol)\s*=",
+    re.I,
+)
+_HEADLINES_DUMP = re.compile(
+    r"(?:^|\n)\s*recent headlines:\s*.+$",
+    re.I | re.M,
+)
+
 
 def normalize_model_output(text: str | None) -> str:
     """Strip reasoning wrappers / special tokens; normalize desk markdown."""
@@ -40,17 +72,49 @@ def normalize_model_output(text: str | None) -> str:
     out = _CODE_FENCE.sub("", out)
     out = out.replace("\u00a0", " ")
 
+    # If the model leaked the offline meta dump, keep only from the first real heading.
+    if re.search(r"here(?:'s| is) a structured take|you asked:|available context", out, re.I):
+        heading = re.search(r"(?m)^(#{1,3}\s+\S.*)$", out)
+        if heading:
+            out = out[heading.start() :]
+        else:
+            # No salvageable research body — drop the junk entirely
+            out = ""
+
+    # Cut leaked context / headline dumps
+    out = _LEAKED_CONTEXT.sub("", out)
+    out = _HEADLINES_DUMP.sub("", out)
+
+    # If the model started pasting key=value research dumps, keep only the prose before.
+    kv = _LEAKED_KV.search(out)
+    if kv and kv.start() > 40:
+        out = out[: kv.start()].rstrip()
+    elif kv and kv.start() <= 40:
+        # Almost entirely a dump — keep only content after the dump block if any heading follows
+        after = out[kv.start() :]
+        heading = re.search(r"(?m)^(#{1,3}\s+.+)$", after)
+        out = after[heading.start() :] if heading else ""
+
     # Ensure section markers aren't glued to previous lines
     out = _HEADING_GLUE.sub(r"\1\n\n\2", out)
     out = _SECTION_GLUE.sub(r"\1\n\n\2\n\n\3", out)
 
-    # Normalize heading styles Groq often emits
+    # Normalize heading styles Groq often emits + drop meta/leak lines
     lines: list[str] = []
     for raw in out.split("\n"):
         line = raw.rstrip()
         stripped = line.strip()
         if not stripped:
             lines.append("")
+            continue
+        if _META_LINE.match(stripped):
+            continue
+        if re.match(r"^-\s*\w[\w_]*=", stripped):
+            continue
+        # Drop leftover "You asked: “…'" wrappers spanning one line
+        if stripped.lower().startswith("you asked"):
+            continue
+        if stripped.lower().startswith("here's a structured"):
             continue
         # **1) Snapshot**  →  ### 1) Snapshot
         bold_h = re.match(r"^\*\*(\d{1,2}[).]\s+.+?)\*\*$", stripped)
@@ -60,7 +124,8 @@ def normalize_model_output(text: str | None) -> str:
         # 1) Snapshot  (bare known desk header)
         bare = re.match(
             r"^(\d{1,2})[).]\s+(Snapshot|Market Tape|Trend.*|Fundamentals?|"
-            r"Narratives?.*|Risks?.*|What to Monitor.*|Watch Next.*)$",
+            r"Narratives?.*|Risks?.*|What to Monitor.*|Watch Next.*|"
+            r"Basket Snapshot|Holdings Tape|Concentration.*|Performance Read)$",
             stripped,
             re.I,
         )

@@ -36,7 +36,9 @@ def serialize_user(user: dict[str, Any]) -> dict[str, Any]:
         "id": str(user["_id"]),
         "email": user["email"],
         "username": user["username"],
+        "display_name": user.get("display_name") or None,
         "avatar": user.get("avatar"),
+        "bio": user.get("bio") or None,
         "preferences": user.get("preferences") or {"theme": "system", "notifications": True},
         "email_verified": bool(verified),
         "plan": plan,
@@ -235,7 +237,7 @@ def get_user(user_id: str) -> dict | None:
 
 
 def update_user(user_id: str, patch: dict[str, Any]) -> dict | None:
-    allowed = {"username", "avatar", "preferences"}
+    allowed = {"username", "avatar", "preferences", "display_name", "bio"}
     data = {k: v for k, v in patch.items() if k in allowed}
     if "username" in data:
         username = str(data["username"] or "").strip()
@@ -243,12 +245,45 @@ def update_user(user_id: str, patch: dict[str, Any]) -> dict | None:
             raise ValueError("Username must be at least 2 characters")
         if len(username) > 32:
             raise ValueError("Username is too long")
+        if not all(c.isalnum() or c in "._-" for c in username):
+            raise ValueError("Username can only use letters, numbers, . _ -")
         taken = db.users.find_one(
             {"username": username, "_id": {"$ne": ObjectId(user_id)}}
         )
         if taken:
             raise ValueError("Username is already taken")
         data["username"] = username
+    if "display_name" in data:
+        display = str(data["display_name"] or "").strip()
+        if len(display) > 48:
+            raise ValueError("Nickname is too long (max 48)")
+        data["display_name"] = display or None
+    if "bio" in data:
+        bio = str(data["bio"] or "").strip()
+        if len(bio) > 160:
+            raise ValueError("Bio is too long (max 160)")
+        data["bio"] = bio or None
+    if "avatar" in data:
+        avatar = data["avatar"]
+        if avatar is None or avatar == "":
+            data["avatar"] = None
+        else:
+            avatar = str(avatar).strip()
+            if avatar.startswith("data:image/"):
+                # ~450KB decoded ≈ ~600k chars base64
+                if len(avatar) > 700_000:
+                    raise ValueError("Image is too large — try a smaller photo")
+                if not any(
+                    avatar.startswith(f"data:image/{fmt}")
+                    for fmt in ("jpeg", "jpg", "png", "webp", "gif")
+                ):
+                    raise ValueError("Use a JPEG, PNG, or WebP image")
+            elif avatar.startswith("https://"):
+                if len(avatar) > 2048:
+                    raise ValueError("Avatar URL is too long")
+            else:
+                raise ValueError("Invalid avatar")
+            data["avatar"] = avatar
     data["updated_at"] = _now()
     db.users.update_one({"_id": ObjectId(user_id)}, {"$set": data})
     return get_user(user_id)

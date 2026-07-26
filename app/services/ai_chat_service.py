@@ -89,15 +89,32 @@ def send_message(user_id: str, payload: dict[str, Any]) -> dict:
     context_parts = []
     research_mode = False
     portfolio_mode = False
+    user_text = content
+
+    def _wants_full_brief(text: str) -> bool:
+        t = (text or "").lower()
+        keys = (
+            "full research",
+            "full brief",
+            "desk brief",
+            "full desk",
+            "complete report",
+            "full report",
+            "run a full",
+            "research desk brief",
+            "portfolio research desk",
+        )
+        return any(k in t for k in keys)
+
     if basket_id:
         from app.services import portfolio_service
 
         basket = portfolio_service.get_basket(user_id, basket_id)
         if basket:
-            portfolio_mode = True
+            portfolio_mode = _wants_full_brief(user_text)
             assets = basket.get("assets") or []
             lines = [
-                "Attached portfolio basket context (use as ground truth; do not invent holdings):\n"
+                "Attached portfolio basket facts:\n"
                 f"- basket_id={basket.get('id')} name={basket.get('name')}\n"
                 f"- note={basket.get('note') or '—'}\n"
                 f"- total_value={basket.get('total_value')} total_cost={basket.get('total_cost')} "
@@ -118,13 +135,13 @@ def send_message(user_id: str, payload: dict[str, Any]) -> dict:
                     f"mcap_rank={coin.get('market_cap_rank')} sentiment={coin.get('sentiment')}"
                 )
             context_parts.append("\n".join(lines))
-    if coin_id and not portfolio_mode:
+    if coin_id and not basket_id:
         coin = db.coins.find_one({"id": coin_id}, {"_id": 0})
         if coin:
-            research_mode = True
+            research_mode = _wants_full_brief(user_text)
             risk = coin.get("risk") or {}
             context_parts.append(
-                "Attached coin research context (use this as ground truth; do not invent prices):\n"
+                "Attached coin facts:\n"
                 f"- id={coin.get('id')} name={coin.get('name')} symbol={coin.get('symbol')}\n"
                 f"- price_usd={coin.get('current_price')} rank={coin.get('market_cap_rank')}\n"
                 f"- mcap={coin.get('market_cap')} fdv={coin.get('fully_diluted_valuation')} "
@@ -144,9 +161,19 @@ def send_message(user_id: str, payload: dict[str, Any]) -> dict:
                 f"- insight={coin.get('ai_insight')}\n"
                 f"- about={'; '.join((coin.get('about_bullets') or [])[:4]) or (coin.get('description') or '')[:500]}"
             )
-    news = list(db.news.find({}, {"_id": 0, "title": 1, "sentiment": 1}).sort("published_at", -1).limit(5))
-    if news:
-        context_parts.append("Recent headlines: " + "; ".join(n.get("title", "") for n in news))
+    # Only attach headlines when the user is asking about news / macro
+    if any(
+        w in user_text.lower()
+        for w in ("news", "headline", "macro", "regulation", "etf", "fed")
+    ):
+        news = list(
+            db.news.find({}, {"_id": 0, "title": 1}).sort("published_at", -1).limit(5)
+        )
+        if news:
+            context_parts.append(
+                "Optional headlines (use only if relevant): "
+                + "; ".join(n.get("title", "") for n in news)
+            )
 
     reply = ai_service.chat(
         messages,

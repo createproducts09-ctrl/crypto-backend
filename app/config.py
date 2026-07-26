@@ -28,6 +28,9 @@ class Config:
     RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
     RESEND_FROM = os.getenv("RESEND_FROM", "Alphora Labs <onboarding@resend.dev>")
 
+    # Avatar data URLs in PATCH /users/me (~700KB max)
+    MAX_CONTENT_LENGTH = int(os.getenv("MAX_CONTENT_LENGTH", str(2 * 1024 * 1024)))
+
     # Comma-separated origins, or "*" for all.
     # Include common Next.js ports — `next dev` often jumps to 3001/3002 when 3000 is busy.
     _cors = os.getenv(

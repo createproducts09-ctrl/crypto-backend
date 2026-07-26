@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 import httpx
@@ -72,17 +73,26 @@ class AIService:
         portfolio_mode: bool = False,
     ) -> str:
         system = (
-            "You are Alphora AI — a premium crypto research desk assistant from Alphora Labs. "
-            "Be clear, calm, and educational. Never give personalized financial advice "
-            "or tell the user to buy/sell. Prefer structured answers with short headings "
-            "and bullets. Use only provided market context for numbers; if a figure is "
-            "missing, say so instead of inventing it."
+            "You are Alphora AI — a crypto research desk assistant from Alphora Labs.\n"
+            "Voice: clear, calm, specific. Educational research only — never personalized "
+            "buy/sell advice.\n\n"
+            "HARD RULES for every reply:\n"
+            "1) Answer ONLY the user's latest question. Stay on that ask.\n"
+            "2) Never dump raw context, key=value fields, 'Available context', "
+            "'Attached coin research', or 'Recent headlines' blocks into the reply.\n"
+            "3) Never open with meta filler: 'Here's a structured take', 'You asked', "
+            "'Regarding X:', 'Let me clarify', 'As an AI'.\n"
+            "4) Use attached market numbers as ground truth. If a figure is missing, say so — "
+            "do not invent prices.\n"
+            "5) Prefer clean markdown: short headings + bullets. No wall of prose.\n"
+            "6) Ignore unrelated news headlines unless the user asked about news/macro.\n"
+            "7) When the question is narrow (e.g. narratives, risks, catalysts), answer that "
+            "topic only — do not force a full 7-section desk brief."
         )
         if portfolio_mode:
             system += (
-                "\n\nWhen the user asks for research on an attached portfolio basket, ALWAYS "
-                "respond in this EXACT markdown structure (same headings every time, no extras, "
-                "no intro/outro outside sections):\n\n"
+                "\n\nWhen the user asks for a FULL portfolio / basket desk brief, respond in "
+                "this EXACT markdown structure (same headings, no intro/outro outside sections):\n\n"
                 "### 1) Basket Snapshot\n"
                 "2–4 short paragraphs on what this basket is trying to do and how it looks today.\n\n"
                 "### 2) Holdings Tape\n"
@@ -103,11 +113,13 @@ class AIService:
                 "### 7) What to Monitor Next\n"
                 "Numbered list 1–5 actionable checkpoints for this book.\n\n"
                 "Separate sections with ---. Keep tone sharp and professional. "
-                "No buy/sell advice. Use only provided holdings context for numbers."
+                "No buy/sell advice. Use only provided holdings context for numbers.\n"
+                "If the user asked a focused follow-up (not a full brief), answer that "
+                "question only — skip the 7-section template."
             )
         elif research_mode:
             system += (
-                "\n\nWhen the user asks for research on the attached coin, ALWAYS respond "
+                "\n\nThe user asked for a FULL coin research desk brief. ALWAYS respond "
                 "in this EXACT markdown structure (same headings every time, no extras, "
                 "no intro/outro outside sections):\n\n"
                 "### 1) Snapshot\n"
@@ -139,7 +151,10 @@ class AIService:
                 "No buy/sell advice. Use only provided market context for numbers."
             )
         if context:
-            system += f"\n\nContext:\n{context}"
+            system += (
+                "\n\nINTERNAL FACT SHEET (for your use only — never paste this block):\n"
+                f"{context}"
+            )
 
         last = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
 
@@ -362,36 +377,88 @@ class AIService:
     def _fallback_reply(
         self, question: str, context: str | None, reason: str = "offline"
     ) -> str:
-        """Local research reply when Groq is unavailable."""
-        q = (question or "").lower()
+        """Local research reply when Groq is unavailable — never dump raw context."""
+        q = (question or "").strip()
+        q_low = q.lower()
         _ = reason
+        ctx = context or ""
 
-        if "rsi" in q:
+        # Pull light facts from internal context without exposing the dump.
+        name = _ctx_field(ctx, "name") or "This asset"
+        symbol = (_ctx_field(ctx, "symbol") or "").upper()
+        categories = _ctx_field(ctx, "categories") or ""
+        about = _ctx_field(ctx, "about") or ""
+        chg24 = _ctx_field(ctx, "change_24h")
+        rank = _ctx_field(ctx, "rank")
+        label = f"{name} ({symbol})" if symbol else name
+
+        if "rsi" in q_low:
             body = (
+                "### RSI\n\n"
                 "RSI (Relative Strength Index) measures momentum on a 0–100 scale. "
-                "Readings above 70 often signal overbought conditions; below 30 oversold. "
-                "Use it with trend and volume, not in isolation."
+                "Above ~70 often reads overbought; below ~30 oversold. "
+                "Pair it with trend and volume — not a standalone signal."
             )
-        elif "compare" in q or " vs " in q:
+        elif any(w in q_low for w in ("narrative", "catalyst", "why now", "theme")):
+            cats = [c.strip() for c in categories.split(",") if c.strip()][:6]
+            bullets = [f"* **{c}**" for c in cats] or [
+                "* *Category tags unavailable in desk cache — refresh the coin and retry.*"
+            ]
+            about_line = about.split(";")[0].strip() if about else ""
             body = (
-                "When comparing networks, weigh settlement security, developer activity, "
-                "fee dynamics, liquidity depth, and real usage—not just price. "
-                "Context for this chat may include market data when a coin is attached."
+                f"### Narratives & catalysts — {label}\n\n"
+                + (f"{about_line}\n\n" if about_line else "")
+                + "Tied to these desk tags right now:\n"
+                + "\n".join(bullets)
+                + "\n\n*Live desk AI is briefly offline — this is a cache-based read, not a full brief.*"
             )
-        elif "risk" in q:
+        elif "risk" in q_low:
             body = (
-                "Key risks typically include volatility, smart-contract or protocol risk, "
-                "liquidity shocks, regulatory uncertainty, and concentration in holders or unlocks."
+                f"### Risks — {label}\n\n"
+                "* Volatility and meme/community flows can dominate tape\n"
+                "* Liquidity shocks when volume fades\n"
+                "* Unlock / float dynamics if supply expands\n"
+                "* Narrative fatigue — cultural attention is the product\n\n"
+                "*Live desk AI is briefly offline — treat this as a starter checklist.*"
+            )
+        elif "compare" in q_low or " vs " in q_low:
+            body = (
+                "### Comparison frame\n\n"
+                "* Settlement security and real usage\n"
+                "* Fee / liquidity depth\n"
+                "* Developer and community activity\n"
+                "* Supply and unlock schedule\n\n"
+                "Price alone is a weak peer metric."
             )
         else:
-            ctx = f"\n\nAvailable context:\n{context}" if context else ""
+            bits = [f"**{label}**"]
+            if rank:
+                bits.append(f"rank #{rank}")
+            if chg24:
+                bits.append(f"24h {chg24}%")
+            head = " · ".join(bits)
             body = (
-                "Here’s a structured take: clarify the thesis, check liquidity and unlocks, "
-                "map catalysts, and size risk before acting. "
-                f"You asked: “{question}”.{ctx}"
+                f"### Desk note\n\n"
+                f"{head}.\n\n"
+                "Live research AI is briefly offline. Re-ask in a moment for a full desk answer, "
+                "or open the coin page for fundamentals and tape."
             )
 
-        return body.strip()
+        return normalize_model_output(body)
+
+
+def _ctx_field(context: str, key: str) -> str | None:
+    if not context:
+        return None
+    m = re.search(
+        rf"(?:^|[\s\-]){re.escape(key)}=([^\n]*?)(?=\s+\w[\w_]*=|$|\n)",
+        context,
+        re.I,
+    )
+    if not m:
+        return None
+    val = m.group(1).strip().strip("\"'")
+    return val if val and val.lower() not in ("none", "null", "—", "-") else None
 
 
 def _read_error_body(resp: httpx.Response) -> str:
