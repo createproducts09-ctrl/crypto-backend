@@ -30,15 +30,48 @@ class AIService:
     """Alphora AI — Groq only (openai/gpt-oss-120b)."""
 
     def __init__(self):
-        self.api_key = getattr(Config, "GROQ_API_KEY", "") or ""
-        self.model = getattr(Config, "GROQ_MODEL", "") or "openai/gpt-oss-120b"
-        self.temperature = float(getattr(Config, "GROQ_TEMPERATURE", 1) or 1)
-        self.max_completion_tokens = int(
-            getattr(Config, "GROQ_MAX_COMPLETION_TOKENS", 2048) or 2048
+        self._refresh_config()
+
+    def _refresh_config(self) -> None:
+        """Reload model settings from .env (avoids stale singleton after edits)."""
+        import os
+
+        from dotenv import load_dotenv
+
+        load_dotenv(override=True)
+
+        self.api_key = (
+            os.getenv("GROQ_API_KEY")
+            or getattr(Config, "GROQ_API_KEY", "")
+            or ""
         )
-        self.top_p = float(getattr(Config, "GROQ_TOP_P", 1) or 1)
+        self.model = (
+            os.getenv("GROQ_MODEL")
+            or getattr(Config, "GROQ_MODEL", "")
+            or "llama-3.3-70b-versatile"
+        )
+        self.fallback_model = (
+            os.getenv("GROQ_FALLBACK_MODEL")
+            or getattr(Config, "GROQ_FALLBACK_MODEL", "")
+            or "llama-3.1-8b-instant"
+        )
+        self.temperature = float(
+            os.getenv("GROQ_TEMPERATURE")
+            or getattr(Config, "GROQ_TEMPERATURE", 1)
+            or 1
+        )
+        self.max_completion_tokens = int(
+            os.getenv("GROQ_MAX_COMPLETION_TOKENS")
+            or getattr(Config, "GROQ_MAX_COMPLETION_TOKENS", 4096)
+            or 4096
+        )
+        self.top_p = float(
+            os.getenv("GROQ_TOP_P") or getattr(Config, "GROQ_TOP_P", 1) or 1
+        )
         self.reasoning_effort = (
-            getattr(Config, "GROQ_REASONING_EFFORT", "") or "medium"
+            os.getenv("GROQ_REASONING_EFFORT")
+            or getattr(Config, "GROQ_REASONING_EFFORT", "")
+            or "medium"
         )
 
     @property
@@ -72,6 +105,7 @@ class AIService:
         research_mode: bool = False,
         portfolio_mode: bool = False,
     ) -> str:
+        self._refresh_config()
         system = (
             "You are Alphora AI — a crypto research desk assistant from Alphora Labs.\n"
             "Voice: clear, calm, specific. Educational research only — never personalized "
@@ -159,17 +193,49 @@ class AIService:
         last = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
 
         if not self.enabled:
-            return self._fallback_reply(last, context, reason="offline")
+            return self._fallback_reply(
+                last,
+                context,
+                reason="offline",
+                research_mode=research_mode,
+                portfolio_mode=portfolio_mode,
+            )
 
         full = [{"role": "system", "content": system}, *messages]
         try:
             return self._chat(full)
         except AIRateLimitError as exc:
-            log.warning("Groq rate-limited (%s); offline reply", exc)
-            return self._fallback_reply(last, context, reason="rate_limit")
+            # Primary model (often gpt-oss-120b) burns daily TPD fast — retry a lighter model.
+            fb = (self.fallback_model or "").strip()
+            if fb and fb != self.model:
+                log.warning(
+                    "Groq rate-limited on %s (%s); retrying with %s",
+                    self.model,
+                    exc,
+                    fb,
+                )
+                try:
+                    return self._chat(full, model_override=fb)
+                except Exception as exc2:
+                    log.warning("Groq fallback model failed (%s); offline reply", exc2)
+            else:
+                log.warning("Groq rate-limited (%s); offline reply", exc)
+            return self._fallback_reply(
+                last,
+                context,
+                reason="rate_limit",
+                research_mode=research_mode,
+                portfolio_mode=portfolio_mode,
+            )
         except Exception as exc:
             log.warning("Groq error (%s); offline reply", exc)
-            return self._fallback_reply(last, context, reason="error")
+            return self._fallback_reply(
+                last,
+                context,
+                reason="error",
+                research_mode=research_mode,
+                portfolio_mode=portfolio_mode,
+            )
 
     def summarize_news(self, title: str, body: str) -> str:
         if not self.enabled:
@@ -241,14 +307,20 @@ class AIService:
             "full": "",
         }
 
-    def _supports_reasoning_effort(self) -> bool:
+    def _supports_reasoning_effort(self, model: str | None = None) -> bool:
         # Only gpt-oss family accepts reasoning_effort on Groq today.
-        m = (self.model or "").lower()
+        m = (model or self.model or "").lower()
         return "gpt-oss" in m or m.startswith("openai/gpt-oss")
 
-    def _chat(self, messages: list[dict[str, str]]) -> str:
+    def _chat(
+        self,
+        messages: list[dict[str, str]],
+        model_override: str | None = None,
+    ) -> str:
         if not self.api_key:
             raise RuntimeError("GROQ_API_KEY not set")
+
+        model = (model_override or self.model or "").strip() or self.model
 
         payload_messages: list[dict[str, str]] = []
         for message in messages:
@@ -263,17 +335,23 @@ class AIService:
         if not payload_messages:
             raise RuntimeError("Empty Groq chat payload")
 
-        use_reasoning = bool(self.reasoning_effort) and self._supports_reasoning_effort()
+        use_reasoning = bool(self.reasoning_effort) and self._supports_reasoning_effort(
+            model
+        )
         try:
-            text = self._groq_complete(payload_messages, use_reasoning=use_reasoning)
+            text = self._groq_complete(
+                payload_messages, use_reasoning=use_reasoning, model=model
+            )
         except RuntimeError as exc:
             msg = str(exc).lower()
             if use_reasoning and "reasoning_effort" in msg:
                 log.warning(
                     "Groq rejected reasoning_effort for %s; retrying without it",
-                    self.model,
+                    model,
                 )
-                text = self._groq_complete(payload_messages, use_reasoning=False)
+                text = self._groq_complete(
+                    payload_messages, use_reasoning=False, model=model
+                )
             else:
                 raise
 
@@ -281,15 +359,20 @@ class AIService:
         if not cleaned:
             raise RuntimeError("Groq returned empty text after normalize")
 
-        log.info("AI reply served via Groq model %s", self.model)
+        log.info("AI reply served via Groq model %s", model)
         return cleaned
 
     def _groq_complete(
-        self, payload_messages: list[dict[str, str]], *, use_reasoning: bool
+        self,
+        payload_messages: list[dict[str, str]],
+        *,
+        use_reasoning: bool,
+        model: str | None = None,
     ) -> str:
         url = "https://api.groq.com/openai/v1/chat/completions"
+        model_name = (model or self.model or "").strip() or self.model
         payload: dict[str, Any] = {
-            "model": self.model,
+            "model": model_name,
             "messages": payload_messages,
             "temperature": self.temperature,
             "max_completion_tokens": self.max_completion_tokens,
@@ -375,7 +458,12 @@ class AIService:
         return text
 
     def _fallback_reply(
-        self, question: str, context: str | None, reason: str = "offline"
+        self,
+        question: str,
+        context: str | None,
+        reason: str = "offline",
+        research_mode: bool = False,
+        portfolio_mode: bool = False,
     ) -> str:
         """Local research reply when Groq is unavailable — never dump raw context."""
         q = (question or "").strip()
@@ -392,14 +480,27 @@ class AIService:
         rank = _ctx_field(ctx, "rank")
         label = f"{name} ({symbol})" if symbol else name
 
-        if "rsi" in q_low:
+        # Full desk briefs must win over keyword stubs — the brief template itself
+        # contains words like "Narratives & Catalysts" / "Risks".
+        if research_mode or portfolio_mode or _is_full_brief_request(q_low):
+            return normalize_model_output(
+                _fallback_full_desk_brief(
+                    ctx,
+                    label=label,
+                    portfolio=portfolio_mode
+                    or "basket" in q_low
+                    or "portfolio" in q_low,
+                )
+            )
+
+        if "rsi" in q_low and "snapshot" not in q_low:
             body = (
                 "### RSI\n\n"
                 "RSI (Relative Strength Index) measures momentum on a 0–100 scale. "
                 "Above ~70 often reads overbought; below ~30 oversold. "
                 "Pair it with trend and volume — not a standalone signal."
             )
-        elif any(w in q_low for w in ("narrative", "catalyst", "why now", "theme")):
+        elif _is_narrow_topic(q_low, ("narrative", "catalyst", "why now", "theme")):
             cats = [c.strip() for c in categories.split(",") if c.strip()][:6]
             bullets = [f"* **{c}**" for c in cats] or [
                 "* *Category tags unavailable in desk cache — refresh the coin and retry.*"
@@ -412,7 +513,7 @@ class AIService:
                 + "\n".join(bullets)
                 + "\n\n*Live desk AI is briefly offline — this is a cache-based read, not a full brief.*"
             )
-        elif "risk" in q_low:
+        elif _is_narrow_topic(q_low, ("risk", "watch-out", "watch out")):
             body = (
                 f"### Risks — {label}\n\n"
                 "* Volatility and meme/community flows can dominate tape\n"
@@ -459,6 +560,200 @@ def _ctx_field(context: str, key: str) -> str | None:
         return None
     val = m.group(1).strip().strip("\"'")
     return val if val and val.lower() not in ("none", "null", "—", "-") else None
+
+
+def _is_full_brief_request(q_low: str) -> bool:
+    keys = (
+        "full research",
+        "full brief",
+        "desk brief",
+        "full desk",
+        "complete report",
+        "full report",
+        "run a full",
+        "research desk brief",
+        "portfolio research desk",
+        "### 1) snapshot",
+        "### 1) basket snapshot",
+    )
+    return any(k in q_low for k in keys)
+
+
+def _is_narrow_topic(q_low: str, needles: tuple[str, ...]) -> bool:
+    """True when the ask is about a topic — not a pasted multi-section template."""
+    if _is_full_brief_request(q_low):
+        return False
+    # Long structured prompts with many ### headings are briefs, not narrow Qs.
+    if q_low.count("###") >= 3:
+        return False
+    return any(n in q_low for n in needles)
+
+
+def _fmt_num(raw: str | None, *, prefix: str = "", suffix: str = "") -> str:
+    if raw is None or raw == "":
+        return "—"
+    try:
+        n = float(str(raw).replace(",", "").replace("%", "").strip())
+    except ValueError:
+        return f"{prefix}{raw}{suffix}".strip() or "—"
+    abs_n = abs(n)
+    if abs_n >= 1_000_000_000:
+        body = f"{n / 1_000_000_000:.2f}B"
+    elif abs_n >= 1_000_000:
+        body = f"{n / 1_000_000:.2f}M"
+    elif abs_n >= 1_000:
+        body = f"{n:,.2f}"
+    elif abs_n >= 1:
+        body = f"{n:.2f}"
+    else:
+        body = f"{n:.6g}"
+    return f"{prefix}{body}{suffix}"
+
+
+def _pct(raw: str | None) -> str:
+    if raw is None or raw == "":
+        return "—"
+    try:
+        n = float(str(raw).replace("%", "").replace(",", "").strip())
+        sign = "+" if n > 0 else ""
+        return f"{sign}{n:.2f}%"
+    except ValueError:
+        return str(raw)
+
+
+def _fallback_full_desk_brief(
+    ctx: str, *, label: str, portfolio: bool = False
+) -> str:
+    """Structured 7-section brief from desk cache when live AI is unavailable."""
+    about = _ctx_field(ctx, "about") or ""
+    about_line = about.split(";")[0].strip() if about else ""
+    cats = [
+        c.strip()
+        for c in (_ctx_field(ctx, "categories") or "").split(",")
+        if c.strip()
+    ][:6]
+    insight = _ctx_field(ctx, "insight") or ""
+    risk = _ctx_field(ctx, "risk") or ""
+    price = _fmt_num(_ctx_field(ctx, "price_usd"), prefix="$")
+    mcap = _fmt_num(_ctx_field(ctx, "mcap"), prefix="$")
+    fdv = _fmt_num(_ctx_field(ctx, "fdv"), prefix="$")
+    vol = _fmt_num(_ctx_field(ctx, "volume_24h"), prefix="$")
+    chg1h = _pct(_ctx_field(ctx, "change_1h"))
+    chg24 = _pct(_ctx_field(ctx, "change_24h"))
+    chg7d = _pct(_ctx_field(ctx, "change_7d"))
+    chg30d = _pct(_ctx_field(ctx, "change_30d"))
+    ath = _fmt_num(_ctx_field(ctx, "ath"), prefix="$")
+    atl = _fmt_num(_ctx_field(ctx, "atl"), prefix="$")
+    rank = _ctx_field(ctx, "rank") or "—"
+    sentiment = _ctx_field(ctx, "sentiment") or "—"
+
+    if portfolio:
+        total_value = _fmt_num(_ctx_field(ctx, "total_value"), prefix="$")
+        total_cost = _fmt_num(_ctx_field(ctx, "total_cost"), prefix="$")
+        pnl = _fmt_num(_ctx_field(ctx, "pnl"), prefix="$")
+        pnl_pct = _pct(_ctx_field(ctx, "pnl_pct"))
+        basket_name = _ctx_field(ctx, "name") or label
+        return (
+            f"### 1) Basket Snapshot\n"
+            f"{basket_name} — cache desk read while live AI is rate-limited.\n"
+            f"Book snapshot from attached holdings only; re-ask shortly for a live write-up.\n\n"
+            f"---\n\n"
+            f"### 2) Holdings Tape\n"
+            f"* **Basket Value**: {total_value}\n"
+            f"* **Cost Basis**: {total_cost}\n"
+            f"* **P&L**: {pnl} ({pnl_pct})\n\n"
+            f"---\n\n"
+            f"### 3) Concentration & Weights\n"
+            f"* Review largest position weights in the attached holdings list.\n"
+            f"* Single-name and narrative concentration dominate risk when AI is offline.\n\n"
+            f"---\n\n"
+            f"### 4) Performance Read\n"
+            f"* P&L is driven by spot moves vs cost basis on the largest weights.\n"
+            f"* Re-check 24h movers on each holding when the live model returns.\n\n"
+            f"---\n\n"
+            f"### 5) Narratives Across Names\n"
+            f"* Shared themes come from overlapping categories across holdings.\n"
+            f"* Treat this as a placeholder until the live desk brief runs.\n\n"
+            f"---\n\n"
+            f"### 6) Risks & Watch-Outs\n"
+            f"* Concentration risk if one name is most of NAV\n"
+            f"* Correlation spikes in risk-off tapes\n"
+            f"* Stale prices if market data lags\n\n"
+            f"---\n\n"
+            f"### 7) What to Monitor Next\n"
+            f"1. Re-run the full basket brief once live AI is available\n"
+            f"2. Largest weight vs thesis\n"
+            f"3. 24h P&L drivers\n"
+            f"4. Liquidity on top holdings\n"
+            f"5. Any unlock / event risk on concentrated names\n"
+        )
+
+    snap_bits = [
+        f"{label} sits at {price} with market cap {mcap} (rank #{rank}).",
+    ]
+    if about_line:
+        snap_bits.append(about_line)
+    else:
+        snap_bits.append(
+            "Wrapped / liquid-staking style assets track underlying ETH staking exposure "
+            "with DeFi composability as the product."
+            if "steth" in label.lower() or "wsteth" in label.lower()
+            else "Use the coin desk fundamentals and tape for the full picture while live AI recovers."
+        )
+    if insight:
+        snap_bits.append(insight)
+
+    cat_bullets = (
+        "\n".join(f"* **{c}**" for c in cats)
+        if cats
+        else "* Category tags unavailable in desk cache"
+    )
+
+    return (
+        f"### 1) Snapshot\n"
+        + " ".join(snap_bits)
+        + "\n\n"
+        f"---\n\n"
+        f"### 2) Market Tape\n"
+        f"* **Spot Price**: {price}\n"
+        f"* **Market Capitalization**: {mcap}\n"
+        f"* **Fully Diluted Valuation (FDV)**: {fdv}\n"
+        f"* **24-Hour Trading Volume**: {vol}\n"
+        f"* **1-Hour**: {chg1h}\n"
+        f"* **24-Hour**: {chg24}\n"
+        f"* **7-Day**: {chg7d}\n"
+        f"* **30-Day**: {chg30d}\n"
+        f"* **All-Time High (ATH)**: {ath}\n"
+        f"* **All-Time Low (ATL)**: {atl}\n"
+        f"* Desk sentiment tag: {sentiment}\n\n"
+        f"---\n\n"
+        f"### 3) Trend & Technical Read\n"
+        f"* 24h tape: {chg24}; 7d: {chg7d}; 30d: {chg30d}\n"
+        f"* Bias follows recent multi-day direction until structure breaks\n"
+        f"* Prefer levels from the coin chart — this cache brief has no live OHLC\n\n"
+        f"---\n\n"
+        f"### 4) Fundamentals\n"
+        f"* What it is: {about_line or 'See coin page description for protocol detail'}\n"
+        f"* Role in stack: composable claim on underlying exposure / liquidity wrapper\n"
+        f"* Desk risk tag: {risk or '—'}\n\n"
+        f"---\n\n"
+        f"### 5) Narratives & Catalysts\n"
+        f"{cat_bullets}\n\n"
+        f"---\n\n"
+        f"### 6) Risks & Watch-Outs\n"
+        f"* Smart-contract / wrapper risk vs the underlying asset\n"
+        f"* Peg / rate basis drift under stress\n"
+        f"* Liquidity thinning on secondary venues\n"
+        f"* Protocol or validator-set events that hit the underlying\n"
+        f"* Regulatory framing around staking products\n\n"
+        f"---\n\n"
+        f"### 7) What to Monitor Next\n"
+        f"1. Spot vs underlying / fair rate\n"
+        f"2. 24h volume vs mcap (liquidity)\n"
+        f"3. DeFi TVL / integration headlines for this wrapper\n"
+        f"4. Major unlock or governance events on the underlying protocol\n"
+        f"5. Re-run a live Alphora desk brief when model quota resets\n"
+    )
 
 
 def _read_error_body(resp: httpx.Response) -> str:
