@@ -33,3 +33,17 @@ def delete_me():
     if not ok:
         return jsonify({"error": err or "Could not delete account"}), 400
     return jsonify({"ok": True, "deleted": True})
+
+
+@bp.post("/me/fortune")
+@jwt_required()
+def claim_fortune():
+    data = request.get_json() or {}
+    user, err = auth_service.claim_fortune(
+        get_jwt_identity(), str(data.get("coin_id") or "")
+    )
+    if err:
+        return jsonify({"error": err}), 400
+    if not user:
+        return jsonify({"error": "Not found"}), 404
+    return jsonify(user)

@@ -32,6 +32,14 @@ def serialize_user(user: dict[str, Any]) -> dict[str, Any]:
     plan = (user.get("plan") or "free").strip().lower()
     if plan not in {"free", "keel"}:
         plan = "free"
+    fortune = user.get("fortune_pick") or None
+    fortune_out = None
+    if isinstance(fortune, dict) and fortune.get("coin_id"):
+        picked_at = fortune.get("picked_at")
+        fortune_out = {
+            "coin_id": str(fortune["coin_id"]),
+            "picked_at": picked_at.isoformat() if hasattr(picked_at, "isoformat") else picked_at,
+        }
     return {
         "id": str(user["_id"]),
         "email": user["email"],
@@ -42,6 +50,7 @@ def serialize_user(user: dict[str, Any]) -> dict[str, Any]:
         "preferences": user.get("preferences") or {"theme": "system", "notifications": True},
         "email_verified": bool(verified),
         "plan": plan,
+        "fortune_pick": fortune_out,
         "created_at": user.get("created_at").isoformat() if user.get("created_at") else None,
     }
 
@@ -54,17 +63,25 @@ def _tokens_for(user_id: ObjectId | str) -> dict[str, str]:
     }
 
 
-def _send_emails_async(email: str, username: str, code: str):
+def _send_emails_async(app, email: str, username: str, code: str):
     """Send verification and welcome emails in background thread."""
     try:
-        verify_result = resend_mail.send_verification_email(email, username, code)
-        welcome_result = resend_mail.send_welcome_email(email, username)
-        logger.info("Background emails sent for %s: verify=%s, welcome=%s", email, verify_result.get("ok"), welcome_result.get("ok"))
+        with app.app_context():
+            verify_result = resend_mail.send_verification_email(email, username, code)
+            welcome_result = resend_mail.send_welcome_email(email, username)
+        logger.info(
+            "Background emails sent for %s: verify=%s, welcome=%s",
+            email,
+            verify_result.get("ok"),
+            welcome_result.get("ok"),
+        )
     except Exception as exc:
         logger.warning("Background email sending failed for %s: %s", email, exc)
 
 
 def register_user(email: str, password: str, username: str) -> tuple[dict | None, str | None]:
+    from flask import current_app
+
     email = email.strip().lower()
     username = username.strip()
     if not email or "@" not in email:
@@ -73,8 +90,10 @@ def register_user(email: str, password: str, username: str) -> tuple[dict | None
         return None, "Username must be at least 2 characters"
     if not password or len(password) < 6:
         return None, "Password must be at least 6 characters"
-    if db.users.find_one({"$or": [{"email": email}, {"username": username}]}):
-        return None, "Email or username already exists"
+    if db.users.find_one({"email": email}):
+        return None, "An account with this email already exists"
+    if db.users.find_one({"username": username}):
+        return None, "This username is already taken"
 
     password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
     code = _make_code()
@@ -99,10 +118,11 @@ def register_user(email: str, password: str, username: str) -> tuple[dict | None
     doc["_id"] = result.inserted_id
 
     # Send emails asynchronously to avoid blocking the response
+    app = current_app._get_current_object()
     thread = threading.Thread(
         target=_send_emails_async,
-        args=(email, username, code),
-        daemon=True
+        args=(app, email, username, code),
+        daemon=True,
     )
     thread.start()
 
@@ -234,6 +254,43 @@ def get_user(user_id: str) -> dict | None:
     except Exception:
         return None
     return serialize_user(user) if user else None
+
+
+def claim_fortune(user_id: str, coin_id: str) -> tuple[dict | None, str | None]:
+    """One lifetime pick per account. Idempotent — returns existing pick if already claimed."""
+    from pymongo import ReturnDocument
+
+    coin_id = (coin_id or "").strip()
+    if not coin_id or len(coin_id) > 64:
+        return None, "Invalid coin"
+    try:
+        oid = ObjectId(user_id)
+    except Exception:
+        return None, "Invalid user"
+
+    user = db.users.find_one({"_id": oid})
+    if not user:
+        return None, "Not found"
+
+    existing = user.get("fortune_pick")
+    if isinstance(existing, dict) and existing.get("coin_id"):
+        return serialize_user(user), None
+
+    now = _now()
+    updated = db.users.find_one_and_update(
+        {"_id": oid, "fortune_pick": {"$exists": False}},
+        {
+            "$set": {
+                "fortune_pick": {"coin_id": coin_id, "picked_at": now},
+                "updated_at": now,
+            }
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+    if updated is None:
+        user = db.users.find_one({"_id": oid})
+        return serialize_user(user) if user else None, None
+    return serialize_user(updated), None
 
 
 def update_user(user_id: str, patch: dict[str, Any]) -> dict | None:
