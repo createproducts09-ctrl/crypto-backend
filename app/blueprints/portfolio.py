@@ -3,9 +3,47 @@ from __future__ import annotations
 from flask import Blueprint, jsonify, request
 from flask_jwt_extended import get_jwt_identity, jwt_required
 
-from app.services import portfolio_service
+from app.services import exchange_import, portfolio_service
 
 bp = Blueprint("portfolio", __name__)
+
+
+@bp.get("/platforms")
+@jwt_required()
+def list_platforms():
+    return jsonify({"items": exchange_import.list_platforms()})
+
+
+@bp.post("/import")
+@jwt_required()
+def import_thesis():
+    data = request.get_json() or {}
+    platform = (data.get("platform") or "").strip().lower()
+    name = (data.get("name") or "").strip()
+    note = data.get("note") or ""
+    credentials = data.get("credentials") or {}
+    if not isinstance(credentials, dict):
+        credentials = {}
+    credentials = {
+        str(k): str(v) for k, v in credentials.items() if v is not None and str(v).strip()
+    }
+    if not platform:
+        return jsonify({"error": "platform required"}), 400
+    try:
+        result = exchange_import.import_thesis(
+            get_jwt_identity(),
+            platform=platform,
+            name=name,
+            note=note,
+            credentials=credentials,
+        )
+    except PermissionError as exc:
+        return jsonify({"error": str(exc), "code": "plan_limit", "upgrade": True}), 402
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"error": f"Import failed: {exc}"}), 502
+    return jsonify(result), 201
 
 
 def _parse_float(value, field: str, required: bool = False, min_value: float | None = 0.0):
@@ -110,6 +148,36 @@ def add_asset(basket_id: str):
 @jwt_required()
 def remove_asset(basket_id: str, coin_id: str):
     basket = portfolio_service.remove_asset(get_jwt_identity(), basket_id, coin_id)
+    if not basket:
+        return jsonify({"error": "Not found"}), 404
+    return jsonify(basket)
+
+
+@bp.post("/baskets/<basket_id>/unmapped/map")
+@jwt_required()
+def map_unmapped(basket_id: str):
+    data = request.get_json() or {}
+    symbol = (data.get("symbol") or "").strip()
+    coin_id = (data.get("coin_id") or "").strip()
+    if not symbol or not coin_id:
+        return jsonify({"error": "symbol and coin_id required"}), 400
+    try:
+        basket = portfolio_service.map_unmapped_asset(
+            get_jwt_identity(), basket_id, symbol, coin_id
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    if not basket:
+        return jsonify({"error": "Not found"}), 404
+    return jsonify(basket)
+
+
+@bp.delete("/baskets/<basket_id>/unmapped/<symbol>")
+@jwt_required()
+def dismiss_unmapped(basket_id: str, symbol: str):
+    basket = portfolio_service.dismiss_unmapped_asset(
+        get_jwt_identity(), basket_id, symbol
+    )
     if not basket:
         return jsonify({"error": "Not found"}), 404
     return jsonify(basket)

@@ -131,6 +131,16 @@ def _serialize_basket(doc: dict, enrich: bool = True) -> dict:
         "pnl": pnl,
         "pnl_pct": (pnl / total_cost * 100) if total_cost else None,
         "assets": out_assets,
+        "unmapped_assets": [
+            {
+                "symbol": str(u.get("symbol") or "").upper(),
+                "amount": float(u.get("amount") or 0),
+                "avg_price": float(u.get("avg_price") or 0),
+            }
+            for u in (doc.get("unmapped_assets") or [])
+            if str(u.get("symbol") or "").strip()
+        ],
+        "import_platform": doc.get("import_platform") or None,
         "created_at": doc.get("created_at").isoformat() if doc.get("created_at") else None,
         "updated_at": doc.get("updated_at").isoformat() if doc.get("updated_at") else None,
     }
@@ -187,12 +197,30 @@ def get_basket(user_id: str, basket_id: str) -> dict | None:
     return _serialize_basket(doc)
 
 
+def _clean_unmapped(items: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in items or []:
+        symbol = str(raw.get("symbol") or "").strip().upper()
+        if not symbol or symbol in seen:
+            continue
+        amount = _safe_float(raw.get("amount"), 0.0) or 0.0
+        if amount <= 0:
+            continue
+        avg = _safe_float(raw.get("avg_price"), 0.0) or 0.0
+        seen.add(symbol)
+        out.append({"symbol": symbol, "amount": float(amount), "avg_price": float(avg)})
+    return out
+
+
 def create_basket(
     user_id: str,
     name: str,
     coin_ids: list[str] | None = None,
     import_watchlist: bool = False,
     note: str = "",
+    unmapped_assets: list[dict[str, Any]] | None = None,
+    import_platform: str | None = None,
 ) -> dict:
     clean_name = (name or "").strip()[:60] or "My basket"
     ids: list[str] = []
@@ -214,14 +242,17 @@ def create_basket(
                 ids.append(cid)
 
     now = _now()
-    doc = {
+    doc: dict[str, Any] = {
         "user_id": user_id,
         "name": clean_name,
         "note": (note or "").strip()[:200],
         "assets": [{"coin_id": cid, "amount": 0.0, "avg_price": 0.0, "cost_basis": 0.0} for cid in ids],
+        "unmapped_assets": _clean_unmapped(unmapped_assets),
         "created_at": now,
         "updated_at": now,
     }
+    if import_platform:
+        doc["import_platform"] = str(import_platform).strip().lower()[:40]
     res = db.baskets.insert_one(doc)
     doc["_id"] = res.inserted_id
     return _serialize_basket(doc)
@@ -356,6 +387,84 @@ def set_holding(
             },
             "$set": {"updated_at": _now()},
         },
+    )
+    return get_basket(user_id, basket_id)
+
+
+def map_unmapped_asset(
+    user_id: str,
+    basket_id: str,
+    symbol: str,
+    coin_id: str,
+) -> dict | None:
+    """Move an imported unmapped symbol onto a real coin holding."""
+    oid = _oid(basket_id)
+    symbol = (symbol or "").strip().upper()
+    coin_id = (coin_id or "").strip()
+    if not oid or not symbol or not coin_id:
+        return None
+
+    doc = db.baskets.find_one({"_id": oid, "user_id": user_id})
+    if not doc:
+        return None
+
+    unmapped = list(doc.get("unmapped_assets") or [])
+    match = next(
+        (u for u in unmapped if str(u.get("symbol") or "").upper() == symbol),
+        None,
+    )
+    if not match:
+        raise ValueError(f"No unmapped holding for {symbol}")
+
+    amount = float(match.get("amount") or 0)
+    avg_price = float(match.get("avg_price") or 0)
+    existing = next(
+        (a for a in (doc.get("assets") or []) if a.get("coin_id") == coin_id),
+        None,
+    )
+    if existing:
+        prev_amt = float(existing.get("amount") or 0)
+        prev_avg = float(existing.get("avg_price") or 0)
+        new_amt = prev_amt + amount
+        if new_amt > 0 and (prev_avg > 0 or avg_price > 0):
+            avg_price = ((prev_amt * prev_avg) + (amount * avg_price)) / new_amt
+        amount = new_amt
+    remaining = [
+        u for u in unmapped if str(u.get("symbol") or "").upper() != symbol
+    ]
+    db.baskets.update_one(
+        {"_id": oid, "user_id": user_id},
+        {"$set": {"unmapped_assets": remaining, "updated_at": _now()}},
+    )
+    return set_holding(
+        user_id,
+        basket_id,
+        coin_id,
+        amount=amount,
+        avg_price=avg_price,
+    )
+
+
+def dismiss_unmapped_asset(
+    user_id: str,
+    basket_id: str,
+    symbol: str,
+) -> dict | None:
+    oid = _oid(basket_id)
+    symbol = (symbol or "").strip().upper()
+    if not oid or not symbol:
+        return None
+    doc = db.baskets.find_one({"_id": oid, "user_id": user_id})
+    if not doc:
+        return None
+    remaining = [
+        u
+        for u in (doc.get("unmapped_assets") or [])
+        if str(u.get("symbol") or "").upper() != symbol
+    ]
+    db.baskets.update_one(
+        {"_id": oid, "user_id": user_id},
+        {"$set": {"unmapped_assets": remaining, "updated_at": _now()}},
     )
     return get_basket(user_id, basket_id)
 
