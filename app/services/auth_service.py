@@ -139,7 +139,14 @@ def register_user(email: str, password: str, username: str) -> tuple[dict | None
 
 def login_user(email: str, password: str) -> tuple[dict | None, str | None]:
     user = db.users.find_one({"email": email.strip().lower()})
-    if not user or not bcrypt.checkpw(password.encode(), user["password_hash"].encode()):
+    pw_hash = (user or {}).get("password_hash") if user else None
+    if not user or not pw_hash:
+        return None, "Invalid credentials"
+    try:
+        ok = bcrypt.checkpw(password.encode(), pw_hash.encode())
+    except Exception:
+        ok = False
+    if not ok:
         return None, "Invalid credentials"
     tokens = _tokens_for(user["_id"])
     verified = user.get("email_verified")
@@ -149,6 +156,126 @@ def login_user(email: str, password: str) -> tuple[dict | None, str | None]:
         "user": serialize_user(user),
         **tokens,
         "needs_verification": not bool(verified),
+    }, None
+
+
+def _unique_username(base: str) -> str:
+    import re
+
+    cleaned = re.sub(r"[^a-zA-Z0-9._-]", "", (base or "").strip())[:24]
+    if len(cleaned) < 2:
+        cleaned = "user"
+    candidate = cleaned
+    n = 0
+    while db.users.find_one({"username": candidate}):
+        n += 1
+        suffix = str(n)
+        candidate = f"{cleaned[: max(1, 32 - len(suffix))]}{suffix}"
+    return candidate
+
+
+def login_with_google(id_token: str) -> tuple[dict | None, str | None]:
+    """Verify Google ID token and return app JWT session (create user if needed)."""
+    from flask import current_app
+    from google.auth.transport import requests as google_requests
+    from google.oauth2 import id_token as google_id_token
+
+    token = (id_token or "").strip()
+    if not token:
+        return None, "Google credential required"
+
+    client_id = (current_app.config.get("GOOGLE_CLIENT_ID") or "").strip()
+    if not client_id:
+        return None, "Google sign-in is not configured"
+
+    try:
+        info = google_id_token.verify_oauth2_token(
+            token,
+            google_requests.Request(),
+            audience=client_id,
+        )
+    except Exception as exc:
+        logger.warning("Google token verify failed: %s", exc)
+        return None, "Invalid Google credential"
+
+    if info.get("iss") not in {"accounts.google.com", "https://accounts.google.com"}:
+        return None, "Invalid Google credential"
+
+    sub = str(info.get("sub") or "").strip()
+    email = str(info.get("email") or "").strip().lower()
+    if not sub or not email or "@" not in email:
+        return None, "Google account email is required"
+    if not info.get("email_verified", False):
+        return None, "Google email is not verified"
+
+    picture = info.get("picture")
+    name = (info.get("name") or info.get("given_name") or "").strip() or None
+    now = _now()
+
+    user = db.users.find_one({"google_sub": sub}) or db.users.find_one({"email": email})
+    if user:
+        updates: dict[str, Any] = {"updated_at": now, "auth_provider": "google"}
+        if not user.get("google_sub"):
+            updates["google_sub"] = sub
+        if not user.get("email_verified"):
+            updates["email_verified"] = True
+        if picture and not user.get("avatar"):
+            updates["avatar"] = picture
+        if name and not user.get("display_name"):
+            updates["display_name"] = name
+        if updates:
+            db.users.update_one({"_id": user["_id"]}, {"$set": updates})
+            user = db.users.find_one({"_id": user["_id"]})
+    else:
+        local = email.split("@", 1)[0]
+        username = _unique_username(local)
+        doc = {
+            "email": email,
+            "username": username,
+            "password_hash": None,
+            "google_sub": sub,
+            "auth_provider": "google",
+            "display_name": name,
+            "avatar": picture if isinstance(picture, str) else None,
+            "preferences": {"theme": "system", "notifications": True},
+            "reading_history": [],
+            "achievements": ["joined"],
+            "email_verified": True,
+            "welcome_email_sent": False,
+            "plan": "free",
+            "created_at": now,
+            "updated_at": now,
+        }
+        result = db.users.insert_one(doc)
+        doc["_id"] = result.inserted_id
+        user = doc
+
+        # Welcome email in background (no verification needed)
+        try:
+            from flask import current_app as flask_app
+
+            app = flask_app._get_current_object()
+
+            def _welcome():
+                try:
+                    with app.app_context():
+                        resend_mail.send_welcome_email(email, username)
+                        db.users.update_one(
+                            {"_id": result.inserted_id},
+                            {"$set": {"welcome_email_sent": True}},
+                        )
+                except Exception as exc:
+                    logger.warning("Google welcome email failed for %s: %s", email, exc)
+
+            threading.Thread(target=_welcome, daemon=True).start()
+        except Exception:
+            pass
+
+    tokens = _tokens_for(user["_id"])
+    return {
+        "user": serialize_user(user),
+        **tokens,
+        "needs_verification": False,
     }, None
 
 

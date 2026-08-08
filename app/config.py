@@ -57,3 +57,6 @@ class Config:
     # AES-256-GCM payload encryption (64-char hex or passphrase)
     API_PAYLOAD_KEY = os.getenv("API_PAYLOAD_KEY", "")
     API_PAYLOAD_ENCRYPTION = os.getenv("API_PAYLOAD_ENCRYPTION", "1")
+
+    # Google Sign-In (web) — OAuth 2.0 Web client ID
+    GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")

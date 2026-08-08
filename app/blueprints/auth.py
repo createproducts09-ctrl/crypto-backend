@@ -38,6 +38,18 @@ def login():
     return jsonify(result)
 
 
+@bp.post("/google")
+def google_login():
+    data = request.get_json() or {}
+    result, err = auth_service.login_with_google(
+        data.get("id_token") or data.get("credential") or ""
+    )
+    if err:
+        status = 503 if "not configured" in err.lower() else 401
+        return jsonify({"error": err}), status
+    return jsonify(result)
+
+
 @bp.post("/verify-email")
 def verify_email():
     data = request.get_json() or {}
