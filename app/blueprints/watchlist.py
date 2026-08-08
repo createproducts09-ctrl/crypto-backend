@@ -9,6 +9,8 @@ bp = Blueprint("watchlist", __name__)
 @bp.get("")
 @jwt_required()
 def list_items():
+    if str(request.args.get("changes", "")).lower() in {"1", "true", "yes"}:
+        return jsonify(watchlist_service.get_watchlist_with_changes(get_jwt_identity()))
     return jsonify({"items": watchlist_service.get_watchlist(get_jwt_identity())})
 
 

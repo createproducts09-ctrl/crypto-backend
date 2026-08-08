@@ -265,7 +265,7 @@ def _user_sets(user_id: str) -> tuple[set[str], set[str], set[str]]:
         action = doc.get("action")
         if action == "pass":
             passed.add(cid)
-        elif action in {"interested", "watch"}:
+        elif action in {"interested", "research", "watch"}:
             interested.add(cid)
         day = doc.get("day_key") or (
             doc.get("created_at").strftime("%Y-%m-%d") if doc.get("created_at") else None
@@ -337,15 +337,17 @@ def get_deck(
         # Category / explore: light shuffle for variety inside the matched set.
         items = _seeded_shuffle(fresh, seed)[:limit]
 
-    if include_why:
-        from app.services.billing_service import why_blurb
+    from app.services.research_service import enrich_coin_for_discover
 
-        enriched = []
-        for coin in items:
-            row = dict(coin)
+    enriched = []
+    for coin in items:
+        row = enrich_coin_for_discover(dict(coin))
+        if include_why:
+            from app.services.billing_service import why_blurb
+
             row["why_blurb"] = why_blurb(coin)
-            enriched.append(row)
-        items = enriched
+        enriched.append(row)
+    items = enriched
 
     return {
         "items": items,
@@ -368,8 +370,10 @@ def record_swipe(user_id: str, coin_id: str, action: str) -> dict[str, Any]:
     action = (action or "").strip().lower()
     if not coin_id:
         raise ValueError("coin_id required")
-    if action not in {"pass", "interested", "watch"}:
-        raise ValueError("action must be pass, interested, or watch")
+    if action not in {"pass", "interested", "research", "watch"}:
+        raise ValueError("action must be pass, interested, research, or watch")
+    # Product loop: Research replaces Interested (keep interested as alias)
+    stored_action = "research" if action == "interested" else action
 
     now = datetime.now(timezone.utc)
     day = _today_key()
@@ -377,7 +381,7 @@ def record_swipe(user_id: str, coin_id: str, action: str) -> dict[str, Any]:
         {"user_id": user_id, "coin_id": coin_id},
         {
             "$set": {
-                "action": action,
+                "action": stored_action,
                 "day_key": day,
                 "updated_at": now,
             },
@@ -385,7 +389,7 @@ def record_swipe(user_id: str, coin_id: str, action: str) -> dict[str, Any]:
         },
         upsert=True,
     )
-    return {"ok": True, "coin_id": coin_id, "action": action, "day": day}
+    return {"ok": True, "coin_id": coin_id, "action": stored_action, "day": day}
 
 
 def allow_passed_again(user_id: str, coin_ids: list[str] | None = None) -> dict[str, Any]:

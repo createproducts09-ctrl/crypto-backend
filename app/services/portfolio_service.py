@@ -92,10 +92,38 @@ def _serialize_basket(doc: dict, enrich: bool = True) -> dict:
         out_assets = assets
 
     pnl = total_value - total_cost
+    # Baskets are theses — attach lean health when enriching
+    thesis_health = None
+    thesis_narrative = None
+    strengthening = 0
+    weakening = 0
+    if enrich and out_assets:
+        coin_ids = [a["coin_id"] for a in out_assets if a.get("coin_id")]
+        coin_lookup = _coins_map(coin_ids)
+        scores = []
+        for item in out_assets:
+            coin_full = coin_lookup.get(item["coin_id"])
+            score = (coin_full or {}).get("research_score")
+            if score is not None:
+                scores.append(float(score))
+                if score >= 72:
+                    strengthening += 1
+                elif score < 48:
+                    weakening += 1
+        if scores:
+            thesis_health = round(sum(scores) / len(scores), 1)
+            thesis_narrative = (
+                f"{strengthening} assets strong · {weakening} weak · health {thesis_health}/100"
+            )
     return {
         "id": str(doc["_id"]),
         "name": doc.get("name") or "Basket",
         "note": doc.get("note") or "",
+        "is_thesis": True,
+        "thesis_health": thesis_health,
+        "thesis_narrative": thesis_narrative,
+        "strengthening_count": strengthening,
+        "weakening_count": weakening,
         "asset_count": len(out_assets),
         "holding_count": sum(1 for a in out_assets if a.get("is_holding")),
         "total_value": total_value,

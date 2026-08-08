@@ -18,6 +18,13 @@ def coin_detail(coin_id: str):
     coin = coin_service.get_coin(coin_id)
     if not coin:
         return jsonify({"error": "Coin not found"}), 404
+    # Attach lean research card fields when available / cheap to compute
+    try:
+        from app.services.research_service import enrich_coin_for_discover
+
+        coin = enrich_coin_for_discover(coin)
+    except Exception:
+        pass
     return jsonify(coin)
 
 

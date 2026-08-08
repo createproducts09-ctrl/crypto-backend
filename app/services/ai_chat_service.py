@@ -135,11 +135,63 @@ def send_message(user_id: str, payload: dict[str, Any]) -> dict:
                     f"mcap_rank={coin.get('market_cap_rank')} sentiment={coin.get('sentiment')}"
                 )
             context_parts.append("\n".join(lines))
+    # Investigator path: score/compare/why questions → grounded research objects
+    investigate_keys = (
+        "research score",
+        "why did",
+        "what changed",
+        "compare ",
+        "since last",
+        "thesis",
+        "evidence",
+    )
+    if any(k in user_text.lower() for k in investigate_keys) and (coin_id or basket_id):
+        from app.services import research_service
+
+        try:
+            inv = research_service.investigator_answer(
+                user_text,
+                coin_id=coin_id,
+                coin_ids=[coin_id] if coin_id else None,
+            )
+            reply = inv.get("answer") or ""
+            if inv.get("table"):
+                lines = ["| Asset | Score | On-chain | Dev | Tokenomics | Momentum |", "|---|---|---|---|---|---|"]
+                for row in inv["table"]:
+                    lines.append(
+                        f"| {row.get('symbol')} | {row.get('research_score')} | "
+                        f"{row.get('on_chain')} | {row.get('developer')} | "
+                        f"{row.get('tokenomics')} | {row.get('momentum')} |"
+                    )
+                reply = reply + "\n\n" + "\n".join(lines)
+            if inv.get("evidence"):
+                reply += "\n\n### Evidence\n"
+                for e in inv["evidence"][:8]:
+                    reply += f"- **{e.get('label')}**: {e.get('note')} _(`{e.get('source')}`)_\n"
+            db.ai_messages.insert_one(
+                {
+                    "thread_id": thread_id,
+                    "role": "assistant",
+                    "content": reply,
+                    "created_at": datetime.now(timezone.utc),
+                }
+            )
+            db.ai_threads.update_one(
+                {"_id": ObjectId(thread_id)},
+                {"$set": {"updated_at": datetime.now(timezone.utc)}},
+            )
+            return {"thread_id": thread_id, "reply": reply, "mode": "investigate"}
+        except Exception:
+            pass
+
     if coin_id and not basket_id:
         coin = db.coins.find_one({"id": coin_id}, {"_id": 0})
         if coin:
             research_mode = _wants_full_brief(user_text)
             risk = coin.get("risk") or {}
+            research = coin.get("research") or {}
+            so_what = coin.get("so_what") or {}
+            thesis = coin.get("thesis") or {}
             context_parts.append(
                 "Attached coin facts:\n"
                 f"- id={coin.get('id')} name={coin.get('name')} symbol={coin.get('symbol')}\n"
@@ -157,6 +209,12 @@ def send_message(user_id: str, payload: dict[str, Any]) -> dict:
                 f"risk_confidence={risk.get('confidence')} "
                 f"community_score={coin.get('community_score')} "
                 f"liquidity_score={coin.get('liquidity_score')}\n"
+                f"- research_score={coin.get('research_score') or research.get('research_score')}\n"
+                f"- why_interesting={research.get('why_interesting')}\n"
+                f"- biggest_concern={research.get('biggest_concern')}\n"
+                f"- so_what_headline={so_what.get('headline')}\n"
+                f"- thesis_active={thesis.get('active')} "
+                f"bull={((thesis.get('bull') or {}).get('summary') or '')[:180]}\n"
                 f"- categories={', '.join((coin.get('categories') or coin.get('tags') or [])[:8])}\n"
                 f"- insight={coin.get('ai_insight')}\n"
                 f"- about={'; '.join((coin.get('about_bullets') or [])[:4]) or (coin.get('description') or '')[:500]}"

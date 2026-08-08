@@ -32,8 +32,14 @@ def create_app(config_class=Config):
         app,
         resources={r"/*": {"origins": origins}},
         supports_credentials=False if origins == "*" else True,
-        allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
-        expose_headers=["Content-Type"],
+        allow_headers=[
+            "Authorization",
+            "Content-Type",
+            "X-Requested-With",
+            "X-Admin-Key",
+            "X-Accept-Encrypted",
+        ],
+        expose_headers=["Content-Type", "X-Payload-Encrypted"],
         methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         max_age=86400,
     )
@@ -53,7 +59,7 @@ def create_app(config_class=Config):
                 resp.headers["Access-Control-Allow-Credentials"] = "true"
         resp.headers["Access-Control-Allow-Headers"] = (
             request.headers.get("Access-Control-Request-Headers")
-            or "Authorization, Content-Type, X-Requested-With"
+            or "Authorization, Content-Type, X-Requested-With, X-Admin-Key, X-Accept-Encrypted"
         )
         resp.headers["Access-Control-Allow-Methods"] = (
             "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS"
@@ -73,13 +79,21 @@ def create_app(config_class=Config):
                 response.headers["Access-Control-Allow-Credentials"] = "true"
             response.headers.setdefault(
                 "Access-Control-Allow-Headers",
-                "Authorization, Content-Type, X-Requested-With",
+                "Authorization, Content-Type, X-Requested-With, X-Admin-Key, X-Accept-Encrypted",
             )
             response.headers.setdefault(
                 "Access-Control-Allow-Methods",
                 "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS",
             )
+            response.headers.setdefault(
+                "Access-Control-Expose-Headers",
+                "Content-Type, X-Payload-Encrypted",
+            )
         return response
+
+    from app.security_payload import register_payload_encryption
+
+    register_payload_encryption(app)
 
     jwt.init_app(app)
     init_mongo(app.config["MONGODB_URI"])
@@ -106,6 +120,8 @@ def create_app(config_class=Config):
     from app.blueprints.quiet import bp as quiet_bp
     from app.blueprints.duels import bp as duels_bp
     from app.blueprints.billing import bp as billing_bp
+    from app.blueprints.research import bp as research_bp
+    from app.blueprints.admin import bp as admin_bp
     from app import sockets  # noqa: F401
 
     app.register_blueprint(auth_bp, url_prefix="/api/auth")
@@ -123,6 +139,8 @@ def create_app(config_class=Config):
     app.register_blueprint(quiet_bp, url_prefix="/api/quiet")
     app.register_blueprint(duels_bp, url_prefix="/api/duels")
     app.register_blueprint(billing_bp, url_prefix="/api/billing")
+    app.register_blueprint(research_bp, url_prefix="/api/research")
+    app.register_blueprint(admin_bp, url_prefix="/api/admin")
 
     @app.get("/api/health")
     def health():

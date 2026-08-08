@@ -13,12 +13,18 @@ def _oid(user_id: str) -> ObjectId:
 
 
 def get_watchlist(user_id: str) -> list[dict]:
+    from app.services.research_service import enrich_coin_for_discover
+
     items = list(db.watchlist.find({"user_id": user_id}).sort("created_at", -1))
     coin_ids = [i["coin_id"] for i in items]
     coins = {c["id"]: c for c in db.coins.find({"id": {"$in": coin_ids}}, {"_id": 0})}
     out = []
     for item in items:
         coin = coins.get(item["coin_id"], {"id": item["coin_id"]})
+        try:
+            coin = enrich_coin_for_discover(coin)
+        except Exception:
+            pass
         out.append(
             {
                 "id": str(item["_id"]),
@@ -31,6 +37,15 @@ def get_watchlist(user_id: str) -> list[dict]:
             }
         )
     return out
+
+
+def get_watchlist_with_changes(user_id: str) -> dict:
+    """Watchlist plus intelligent change feed."""
+    from app.services import monitor_service
+
+    items = get_watchlist(user_id)
+    feed = monitor_service.watchlist_changes(user_id)
+    return {"items": items, "changes": feed}
 
 
 def add_to_watchlist(user_id: str, coin_id: str, category: str = "default", notes: str = "", tags: list | None = None) -> dict:

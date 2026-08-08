@@ -7,6 +7,7 @@ from app.services.conviction_service import score_convictions
 from app.services.duel_service import resolve_duels
 from app.services.news_service import sync_news_feed
 from app.services.quiet_service import cleanup_ready_expired
+from app.services.research_service import recompute_top_scores
 
 
 def sync_markets() -> dict:
@@ -14,6 +15,10 @@ def sync_markets() -> dict:
     markets = coingecko.markets(page=1, per_page=100)
     total = upsert_markets(markets)
     return {"synced": total}
+
+
+def sync_research_scores() -> dict:
+    return recompute_top_scores(limit=30)
 
 
 def sync_news() -> dict:

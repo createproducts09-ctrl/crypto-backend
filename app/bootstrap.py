@@ -27,6 +27,12 @@ def ensure_indexes():
     db.duel_entries.create_index([("user_id", 1), ("coin_id", 1), ("horizon", 1), ("status", 1)])
     db.duels.create_index([("resolve_at", 1), ("status", 1)])
     db.duels.create_index([("status", 1), ("created_at", -1)])
+    # Alphora research loop
+    db.coin_snapshots.create_index([("coin_id", 1), ("day_key", -1)], unique=True)
+    db.coin_research.create_index("coin_id", unique=True)
+    db.coin_tvl.create_index("coin_id", unique=True)
+    db.research_views.create_index([("user_id", 1), ("coin_id", 1)], unique=True)
+    db.coins.create_index("research_score")
 
 
 def seed_demo_community():

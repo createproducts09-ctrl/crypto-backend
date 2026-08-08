@@ -32,11 +32,14 @@ def start_background_jobs(app: Flask) -> None:
                     run_quiet_cleanup,
                     sync_markets,
                     sync_news,
+                    sync_research_scores,
                 )
 
                 _safe_run("sync_markets", sync_markets)
                 time.sleep(2)
                 _safe_run("sync_news", sync_news)
+                time.sleep(2)
+                _safe_run("sync_research_scores", sync_research_scores)
                 time.sleep(2)
                 _safe_run("evaluate_alerts", evaluate_alerts)
                 time.sleep(2)

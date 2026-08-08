@@ -42,7 +42,7 @@ def serialize_user(user: dict[str, Any]) -> dict[str, Any]:
         }
     return {
         "id": str(user["_id"]),
-        "email": user["email"],
+        "email": user.get("email") or "",
         "username": user["username"],
         "display_name": user.get("display_name") or None,
         "avatar": user.get("avatar"),
