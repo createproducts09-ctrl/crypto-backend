@@ -33,6 +33,8 @@ def ensure_indexes():
     db.coin_tvl.create_index("coin_id", unique=True)
     db.research_views.create_index([("user_id", 1), ("coin_id", 1)], unique=True)
     db.coins.create_index("research_score")
+    db.bhasha_cache.create_index("key", unique=True)
+    db.bhasha_cache.create_index("expires_at")
 
 
 def seed_demo_community():

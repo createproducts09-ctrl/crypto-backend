@@ -27,7 +27,7 @@ class AIRateLimitError(RuntimeError):
 
 
 class AIService:
-    """Alphora AI — Groq only (openai/gpt-oss-120b)."""
+    """Alphora AI — Sarvam RAG first, Groq fallback."""
 
     def __init__(self):
         self._refresh_config()
@@ -76,7 +76,9 @@ class AIService:
 
     @property
     def enabled(self) -> bool:
-        return bool(self.api_key)
+        from app.clients.sarvam import sarvam_client
+
+        return bool(self.api_key) or sarvam_client.enabled
 
     def insight_for_coin(self, coin: dict[str, Any]) -> str:
         name = coin.get("name") or coin.get("symbol") or "This asset"
@@ -228,7 +230,7 @@ class AIService:
                 portfolio_mode=portfolio_mode,
             )
         except Exception as exc:
-            log.warning("Groq error (%s); offline reply", exc)
+            log.warning("LLM error (%s); offline reply", exc)
             return self._fallback_reply(
                 last,
                 context,
@@ -317,11 +319,6 @@ class AIService:
         messages: list[dict[str, str]],
         model_override: str | None = None,
     ) -> str:
-        if not self.api_key:
-            raise RuntimeError("GROQ_API_KEY not set")
-
-        model = (model_override or self.model or "").strip() or self.model
-
         payload_messages: list[dict[str, str]] = []
         for message in messages:
             role = message.get("role") or "user"
@@ -333,8 +330,29 @@ class AIService:
             payload_messages.append({"role": role, "content": text})
 
         if not payload_messages:
-            raise RuntimeError("Empty Groq chat payload")
+            raise RuntimeError("Empty chat payload")
 
+        from app.clients.sarvam import sarvam_client
+
+        # Retrieval stays Alphora research facts; Sarvam is the generator.
+        if sarvam_client.enabled and not model_override:
+            try:
+                text = sarvam_client.chat(
+                    payload_messages,
+                    temperature=min(self.temperature, 0.55),
+                    max_tokens=min(max(self.max_completion_tokens, 4096), 8192),
+                )
+                cleaned = normalize_model_output(text)
+                if cleaned:
+                    log.info("AI reply served via Sarvam RAG (%s)", sarvam_client.chat_model)
+                    return cleaned
+            except Exception as exc:
+                log.warning("Sarvam RAG failed; trying Groq: %s", exc)
+
+        if not self.api_key:
+            raise RuntimeError("No chat provider configured (Sarvam/Groq)")
+
+        model = (model_override or self.model or "").strip() or self.model
         use_reasoning = bool(self.reasoning_effort) and self._supports_reasoning_effort(
             model
         )

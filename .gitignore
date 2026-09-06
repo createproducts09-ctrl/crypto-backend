@@ -23,3 +23,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Local MongoDB binary + data (dev only)
+.local-mongo/

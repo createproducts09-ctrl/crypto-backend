@@ -28,11 +28,18 @@ class Config:
     GROQ_TOP_P = float(os.getenv("GROQ_TOP_P", "1"))
     GROQ_REASONING_EFFORT = os.getenv("GROQ_REASONING_EFFORT", "medium")
 
+    # Sarvam — Indic STT / TTS / translate / chat (Alphora Bhasha)
+    # https://dashboard.sarvam.ai
+    SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "")
+    SARVAM_BASE_URL = os.getenv("SARVAM_BASE_URL", "https://api.sarvam.ai").rstrip("/")
+    SARVAM_CHAT_MODEL = os.getenv("SARVAM_CHAT_MODEL", "sarvam-105b-conversations")
+    SARVAM_TTS_SPEAKER = os.getenv("SARVAM_TTS_SPEAKER", "shubh")
+
     RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
     RESEND_FROM = os.getenv("RESEND_FROM", "Alphora Labs <onboarding@resend.dev>")
 
     # Avatar data URLs in PATCH /users/me (~700KB max)
-    MAX_CONTENT_LENGTH = int(os.getenv("MAX_CONTENT_LENGTH", str(2 * 1024 * 1024)))
+    MAX_CONTENT_LENGTH = int(os.getenv("MAX_CONTENT_LENGTH", str(8 * 1024 * 1024)))
 
     # Comma-separated origins, or "*" for all.
     # Include common Next.js ports — `next dev` often jumps to 3001/3002 when 3000 is busy.

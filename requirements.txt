@@ -12,3 +12,4 @@ numpy==2.0.2
 cryptography==43.0.3
 google-auth==2.37.0
 requests==2.32.3
+sarvamai==0.1.31a4

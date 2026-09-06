@@ -395,18 +395,65 @@ def generate_so_what(pack: dict[str, Any], coin: dict[str, Any], thesis: dict[st
         return fallback
 
 
+def _artifact_age_seconds(updated_at: Any) -> float | None:
+    if not updated_at:
+        return None
+    try:
+        if isinstance(updated_at, datetime):
+            at = updated_at
+        else:
+            at = datetime.fromisoformat(str(updated_at).replace("Z", "+00:00"))
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=timezone.utc)
+        return (_now() - at).total_seconds()
+    except Exception:
+        return None
+
+
+def _present_research(artifact: dict[str, Any], coin: dict[str, Any]) -> dict[str, Any]:
+    updated = artifact.get("updated_at")
+    if hasattr(updated, "isoformat"):
+        updated = updated.isoformat()
+    return {
+        **{k: v for k, v in artifact.items() if k != "_id"},
+        "coin": {
+            "id": coin.get("id"),
+            "name": coin.get("name"),
+            "symbol": coin.get("symbol"),
+            "image": coin.get("image"),
+            "current_price": coin.get("current_price"),
+            "market_cap_rank": coin.get("market_cap_rank"),
+            "price_change_percentage_30d": coin.get("price_change_percentage_30d"),
+            "sparkline": coin.get("sparkline"),
+        },
+        "updated_at": updated,
+    }
+
+
 def full_research(coin_id: str, *, force: bool = False, with_ai: bool = True) -> dict[str, Any] | None:
     from app.services import coin_service
-    from app.services import monitor_service
 
     coin = coin_service.get_coin(coin_id)
     if not coin:
         return None
+
+    existing = db.coin_research.find_one({"coin_id": coin_id})
+    if existing and not force:
+        age = _artifact_age_seconds(existing.get("updated_at"))
+        if age is not None and age < 6 * 3600:
+            return _present_research(existing, coin)
+
     pack = compute_research(coin, persist=True) if force else get_or_compute(coin_id, force=force)
     if not pack:
         return None
     thesis = build_thesis(pack, coin)
-    so_what = generate_so_what(pack, coin, thesis) if with_ai else _fallback_so_what(pack, thesis)
+    cached_so = (existing or {}).get("so_what") or coin.get("so_what")
+    if with_ai and (force or not cached_so):
+        so_what = generate_so_what(pack, coin, thesis)
+    elif cached_so:
+        so_what = cached_so
+    else:
+        so_what = _fallback_so_what(pack, thesis)
 
     # Persist structured research artifact
     artifact = {

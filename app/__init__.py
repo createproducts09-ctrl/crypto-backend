@@ -122,6 +122,7 @@ def create_app(config_class=Config):
     from app.blueprints.billing import bp as billing_bp
     from app.blueprints.research import bp as research_bp
     from app.blueprints.admin import bp as admin_bp
+    from app.blueprints.bhasha import bp as bhasha_bp
     from app import sockets  # noqa: F401
 
     app.register_blueprint(auth_bp, url_prefix="/api/auth")
@@ -141,6 +142,7 @@ def create_app(config_class=Config):
     app.register_blueprint(billing_bp, url_prefix="/api/billing")
     app.register_blueprint(research_bp, url_prefix="/api/research")
     app.register_blueprint(admin_bp, url_prefix="/api/admin")
+    app.register_blueprint(bhasha_bp, url_prefix="/api/bhasha")
 
     @app.get("/api/health")
     def health():
